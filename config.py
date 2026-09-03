@@ -119,6 +119,12 @@ class Settings:
     backtest_cache_dir: str = ".cache"  # Directory for cached OHLCV data
     monte_carlo_draws: int = 1000  # Default number of simulation runs
 
+    # ── Agent system ────────────────────────────────────────────────
+    ollama_url: str = "http://localhost:11434"  # Ollama server URL
+    ollama_model: str = "llama3"  # Default Ollama model
+    memory_dir: str = ".memory"  # Directory for persistent memory
+    short_term_capacity: int = 50  # Number of observations in short-term memory
+
     # ── Live trading kill switch ─────────────────────────────────────
     live_enabled: bool = False
     live_kill_switch: bool = False
@@ -182,6 +188,10 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         sentiment_threshold=_getfloat("ALMUDEN_SENTIMENT_THRESHOLD", 0.3),
         backtest_cache_dir=_get("ALMUDEN_BACKTEST_CACHE_DIR", ".cache"),
         monte_carlo_draws=_getint("ALMUDEN_MONTE_CARLO_DRAWS", 1000),
+        ollama_url=_get("ALMUDEN_OLLAMA_URL", "http://localhost:11434"),
+        ollama_model=_get("ALMUDEN_OLLAMA_MODEL", "llama3"),
+        memory_dir=_get("ALMUDEN_MEMORY_DIR", ".memory"),
+        short_term_capacity=_getint("ALMUDEN_SHORT_TERM_CAPACITY", 50),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
