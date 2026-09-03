@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
     p.add_argument("--draws", type=int, help="Number of Monte Carlo draws")
     p.add_argument("--serve", action="store_true", help="Start API server alongside engine")
+    p.add_argument("--kill-switch", action="store_true", help="Engage kill switch and exit")
     p.add_argument("--dry-run", action="store_true", help="Evaluate but do not execute")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
     p.add_argument("--interval", type=float, default=5.0, help="Cycle interval in seconds")
@@ -345,6 +346,10 @@ async def main() -> int:
 
     if args.serve:
         await run_server(settings)
+        return 0
+
+    if args.kill_switch:
+        print("Kill switch engaged. Set ALMUDEN_LIVE_KILL_SWITCH=true to activate.")
         return 0
 
     engine = Engine(settings)

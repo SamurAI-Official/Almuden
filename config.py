@@ -134,6 +134,22 @@ class Settings:
     live_enabled: bool = False
     live_kill_switch: bool = False
 
+    # ── Risk engine ─────────────────────────────────────────────────
+    max_drawdown_pct: float = 10.0  # Max drawdown before stopping
+    max_daily_loss: float = 100.0  # Max daily loss in quote currency
+    max_open_orders: int = 5  # Max concurrent open orders
+    max_consecutive_losses: int = 5  # Circuit breaker threshold
+    max_venue_exposure: float = 500.0  # Max exposure per venue
+    max_errors_per_minute: int = 10  # Max API errors per minute
+
+    # ── Capital scheduler ───────────────────────────────────────────
+    capital_deploy_fraction: float = 0.05  # Start with 5% of capital
+
+    # ── Alerting ────────────────────────────────────────────────────
+    alert_webhook_url: str = ""  # Discord webhook URL
+    telegram_bot_token: str = ""  # Telegram bot token
+    telegram_chat_id: str = ""  # Telegram chat ID
+
     # ── Infrastructure ───────────────────────────────────────────────
     redis_url: str = ""
     postgres_dsn: str = ""
@@ -200,6 +216,16 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         api_host=_get("ALMUDEN_API_HOST", "0.0.0.0"),
         api_port=_getint("ALMUDEN_API_PORT", 8080),
         api_key=_get("ALMUDEN_API_KEY", ""),
+        max_drawdown_pct=_getfloat("ALMUDEN_MAX_DRAWDOWN_PCT", 10.0),
+        max_daily_loss=_getfloat("ALMUDEN_MAX_DAILY_LOSS", 100.0),
+        max_open_orders=_getint("ALMUDEN_MAX_OPEN_ORDERS", 5),
+        max_consecutive_losses=_getint("ALMUDEN_MAX_CONSECUTIVE_LOSSES", 5),
+        max_venue_exposure=_getfloat("ALMUDEN_MAX_VENUE_EXPOSURE", 500.0),
+        max_errors_per_minute=_getint("ALMUDEN_MAX_ERRORS_PER_MINUTE", 10),
+        capital_deploy_fraction=_getfloat("ALMUDEN_CAPITAL_DEPLOY_FRACTION", 0.05),
+        alert_webhook_url=_get("ALMUDEN_ALERT_WEBHOOK_URL", ""),
+        telegram_bot_token=_get("ALMUDEN_TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=_get("ALMUDEN_TELEGRAM_CHAT_ID", ""),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
