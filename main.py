@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     p.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
     p.add_argument("--draws", type=int, help="Number of Monte Carlo draws")
+    p.add_argument("--serve", action="store_true", help="Start API server alongside engine")
     p.add_argument("--dry-run", action="store_true", help="Evaluate but do not execute")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
     p.add_argument("--interval", type=float, default=5.0, help="Cycle interval in seconds")
@@ -272,6 +273,38 @@ async def run_dry_run(settings) -> None:
         await engine.stop()
 
 
+async def run_server(settings) -> None:
+    """Start the API server with engine and agent system."""
+    import asyncio
+    from agent_system import AgentSystem
+    from api.server import APIServer
+
+    # Create engine and agent system
+    from orchestrator.engine import Engine
+    engine = Engine(settings)
+    agent_system = AgentSystem(settings)
+
+    # Create and start API server
+    server = APIServer(
+        settings=settings,
+        engine=engine,
+        agent_system=agent_system,
+    )
+
+    print(f"\n{'='*50}")
+    print(f"  AlMuden API Server")
+    print(f"{'='*50}")
+    print(f"  Dashboard: http://localhost:{settings.api_port}?api_key={server.api_key}")
+    print(f"  API Key:   {server.api_key}")
+    print(f"{'='*50}\n")
+
+    # Start engine in background
+    asyncio.create_task(engine.run_forever(interval=settings.interval))
+
+    # Run server (blocking)
+    server.run()
+
+
 async def main() -> int:
     args = parse_args()
     settings = load_settings(args.dotenv)
@@ -308,6 +341,10 @@ async def main() -> int:
 
     if args.dry_run:
         await run_dry_run(settings)
+        return 0
+
+    if args.serve:
+        await run_server(settings)
         return 0
 
     engine = Engine(settings)

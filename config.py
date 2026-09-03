@@ -125,6 +125,11 @@ class Settings:
     memory_dir: str = ".memory"  # Directory for persistent memory
     short_term_capacity: int = 50  # Number of observations in short-term memory
 
+    # ── API server ──────────────────────────────────────────────────
+    api_host: str = "0.0.0.0"  # API server host
+    api_port: int = 8080  # API server port
+    api_key: str = ""  # API key (auto-generated if empty)
+
     # ── Live trading kill switch ─────────────────────────────────────
     live_enabled: bool = False
     live_kill_switch: bool = False
@@ -192,6 +197,9 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         ollama_model=_get("ALMUDEN_OLLAMA_MODEL", "llama3"),
         memory_dir=_get("ALMUDEN_MEMORY_DIR", ".memory"),
         short_term_capacity=_getint("ALMUDEN_SHORT_TERM_CAPACITY", 50),
+        api_host=_get("ALMUDEN_API_HOST", "0.0.0.0"),
+        api_port=_getint("ALMUDEN_API_PORT", 8080),
+        api_key=_get("ALMUDEN_API_KEY", ""),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
