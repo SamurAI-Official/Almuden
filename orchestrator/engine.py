@@ -23,6 +23,11 @@ from trading.arbitrage.evaluator import Evaluator
 from trading.arbitrage.executor import Executor
 from trading.arbitrage.rebalancer import Rebalancer
 from trading.arbitrage.scanner import Scanner
+from trading.arbitrage.triangular import (
+    TriangularEvaluator,
+    TriangularExecutor,
+    TriangularScanner,
+)
 from trading.exchange import Book, ExchangeGateway
 from trading.paper import PaperBroker
 
@@ -48,6 +53,10 @@ class Engine:
         self._broker = PaperBroker(settings)
         self._executor = Executor(settings, self._broker)
         self._rebalancer = Rebalancer(settings)
+        # Triangular arb components
+        self._tri_scanner = TriangularScanner(settings)
+        self._tri_evaluator = TriangularEvaluator(settings)
+        self._tri_executor = TriangularExecutor(settings, self._broker)
         self._running = False
 
     async def start(self) -> None:
@@ -67,28 +76,48 @@ class Engine:
         phases = self._planner.plan()
         summary: Dict = {"phases": phases, "opportunities": 0, "executed": 0, "pnl": 0.0}
 
-        # 1. Poll books
+        # 1. Poll books (including cross pairs for triangular)
         books = await self._poll_books()
         summary["books"] = len(books)
 
-        # 2. Scan
+        # 2. Scan (cross-venue)
         opportunities = self._scanner.scan(books)
         summary["opportunities"] = len(opportunities)
         await self._bus.publish("scan", {"opportunities": opportunities})
 
-        # 3. Evaluate
+        # 3. Evaluate (cross-venue)
         scored = self._evaluator.evaluate(opportunities)
         summary["scored"] = len(scored)
         await self._bus.publish("evaluate", {"scored": scored})
 
-        # 4. Execute
+        # 4. Execute (cross-venue)
         if scored:
             results = self._executor.execute(scored)
             summary["executed"] = sum(1 for r in results if r.status == "executed")
             summary["pnl"] = sum(r.pnl for r in results)
             await self._bus.publish("execute", {"results": results})
 
-        # 5. Rebalance check
+        # 5. Triangular scan
+        if self._settings.triangular_enabled:
+            tri_opps = self._tri_scanner.scan(books)
+            summary["triangular_opportunities"] = len(tri_opps)
+            await self._bus.publish("triangular_scan", {"opportunities": tri_opps})
+
+            # 6. Triangular evaluate
+            tri_scored = self._tri_evaluator.evaluate(tri_opps)
+            summary["triangular_scored"] = len(tri_scored)
+            await self._bus.publish("triangular_evaluate", {"scored": tri_scored})
+
+            # 7. Triangular execute
+            if tri_scored:
+                tri_results = self._tri_executor.execute(tri_scored)
+                summary["triangular_executed"] = sum(
+                    1 for r in tri_results if r.status == "executed"
+                )
+                summary["triangular_pnl"] = sum(r.pnl for r in tri_results)
+                await self._bus.publish("triangular_execute", {"results": tri_results})
+
+        # 8. Rebalance check
         prices = {
             sym: book.mid
             for (venue, sym), book in books.items()
@@ -102,18 +131,28 @@ class Engine:
         return summary
 
     async def _poll_books(self) -> Dict[Tuple[str, str], Book]:
-        """Fetch books for all venue/symbol combinations."""
+        """Fetch books for all venue/symbol combinations.
+
+        Includes both default symbols (ERG/USDT, XMR/USDT) and triangular
+        cross-pair symbols (XMR/ERG, ERG/XMR) for triangular arb scanning.
+        """
         books: Dict[Tuple[str, str], Book] = {}
         tasks = []
         keys = []
+        # Build list of symbols: default + triangular cross-pairs
+        symbols = list(self.DEFAULT_SYMBOLS)
+        if self._settings.triangular_enabled:
+            for sym in self._settings.triangular_symbols:
+                if sym not in symbols:
+                    symbols.append(sym)
         for venue in self._settings.venues:
-            for symbol in self.DEFAULT_SYMBOLS:
+            for symbol in symbols:
                 keys.append((venue, symbol))
                 tasks.append(self._fetch_safe(venue, symbol))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for (venue, symbol), result in zip(keys, results):
             if isinstance(result, Exception):
-                log.warning("Failed to fetch %s %s: %s", venue, symbol, result)
+                log.debug("Failed to fetch %s %s: %s", venue, symbol, result)
                 continue
             books[(venue, symbol)] = result
         return books

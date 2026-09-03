@@ -3,6 +3,7 @@
 Usage:
     python main.py              # run paper engine in a loop
     python main.py --scan       # one-shot spread matrix, no execution
+    python main.py --triangular # one-shot triangular arb scan
     python main.py --dry-run    # evaluate but do not execute
     python main.py --once       # single cycle, then exit
 """
@@ -30,6 +31,7 @@ def setup_logging(level: str) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="AlMuden crypto arbitrage engine")
     p.add_argument("--scan", action="store_true", help="Print spread matrix and exit")
+    p.add_argument("--triangular", action="store_true", help="Print triangular arb opportunities and exit")
     p.add_argument("--dry-run", action="store_true", help="Evaluate but do not execute")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
     p.add_argument("--interval", type=float, default=5.0, help="Cycle interval in seconds")
@@ -55,6 +57,38 @@ async def run_scan(settings) -> None:
         print(
             f"{row['symbol']:<12} {row['venue_a']:<10} {row['venue_b']:<10} "
             f"{row['mid_a']:>12.6f} {row['mid_b']:>12.6f} {row['edge_bps']:>10.2f}"
+        )
+    await gateway.close()
+
+
+async def run_triangular(settings) -> None:
+    """Fetch books, scan for triangular opportunities, print and exit."""
+    from trading.arbitrage.triangular import TriangularScanner
+    from trading.exchange import ExchangeGateway
+
+    gateway = ExchangeGateway(settings)
+    engine = Engine(settings)
+    engine._gateway = gateway
+    books = await engine._poll_books()
+
+    scanner = TriangularScanner(settings)
+    opportunities = scanner.scan(books)
+
+    if not opportunities:
+        print("No triangular opportunities found.")
+        await gateway.close()
+        return
+
+    print(f"\n{'Venue':<10} {'Cycle':<25} {'Gross bps':>10} {'Legs'}")
+    print("-" * 80)
+    for opp in opportunities:
+        legs_str = " -> ".join(
+            f"{leg['side']} {leg['symbol']} @ {leg['price']:.6f}"
+            for leg in opp["legs"]
+        )
+        print(
+            f"{opp['venue']:<10} {opp['cycle_name']:<25} "
+            f"{opp['gross_edge_bps']:>10.2f}   {legs_str}"
         )
     await gateway.close()
 
@@ -93,6 +127,10 @@ async def main() -> int:
 
     if args.scan:
         await run_scan(settings)
+        return 0
+
+    if args.triangular:
+        await run_triangular(settings)
         return 0
 
     if args.dry_run:

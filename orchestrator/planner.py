@@ -15,7 +15,16 @@ log = logging.getLogger(__name__)
 class Planner:
     """Returns the ordered list of phase names for one engine cycle."""
 
-    PHASES: List[str] = ["poll", "scan", "evaluate", "execute", "rebalance"]
+    PHASES: List[str] = [
+        "poll",
+        "scan",
+        "evaluate",
+        "execute",
+        "triangular_scan",
+        "triangular_evaluate",
+        "triangular_execute",
+        "rebalance",
+    ]
 
     def plan(self) -> List[str]:
         return list(self.PHASES)

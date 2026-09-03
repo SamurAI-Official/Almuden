@@ -104,6 +104,12 @@ class Settings:
     max_position: float = 100.0
     max_drift_bps: float = 500.0
 
+    # ── Triangular arbitrage ────────────────────────────────────────
+    triangular_enabled: bool = True
+    triangular_symbols: List[str] = field(
+        default_factory=lambda: ["XMR/ERG", "ERG/XMR"]
+    )
+
     # ── Live trading kill switch ─────────────────────────────────────
     live_enabled: bool = False
     live_kill_switch: bool = False
@@ -158,6 +164,10 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         min_edge_bps=_getfloat("ALMUDEN_MIN_EDGE_BPS", 10.0),
         max_position=_getfloat("ALMUDEN_MAX_POSITION", 100.0),
         max_drift_bps=_getfloat("ALMUDEN_MAX_DRIFT_BPS", 500.0),
+        triangular_enabled=_getbool("ALMUDEN_TRIANGULAR_ENABLED", True),
+        triangular_symbols=_getlist(
+            "ALMUDEN_TRIANGULAR_SYMBOLS", ["XMR/ERG", "ERG/XMR"]
+        ),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
