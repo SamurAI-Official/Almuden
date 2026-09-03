@@ -1,8 +1,8 @@
-"""Main engine loop — ties the orchestrator, scanner, evaluator, executor,
+"""Main engine loop — ties the environment, scanner, evaluator, executor,
 and broker into a single async cycle.
 
 One cycle:
-  1. Poll order books from all venues for all symbols.
+  1. Poll environment (market data, news, exchange health, regime).
   2. Scan for cross-venue opportunities.
   3. Evaluate (fee-aware) and filter.
   4. Execute via the broker (paper by default).
@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 from config import Settings
 from database.postgres import make_store
 from database.redis import make_cache
+from environment import Environment, EnvironmentState
 from orchestrator.events import EventBus
 from orchestrator.planner import Planner
 from trading.arbitrage.evaluator import Evaluator
@@ -45,7 +46,8 @@ class Engine:
         self._settings = settings
         self._bus = EventBus()
         self._planner = Planner()
-        self._gateway = ExchangeGateway(settings)
+        self._environment = Environment(settings)
+        self._gateway = self._environment._market._gateway  # Reuse gateway from environment
         self._cache = make_cache(settings.redis_url)
         self._store = make_store(settings.postgres_dsn)
         self._scanner = Scanner(self.DEFAULT_SYMBOLS)
@@ -67,7 +69,7 @@ class Engine:
     async def stop(self) -> None:
         self._running = False
         await self._bus.stop()
-        await self._gateway.close()
+        await self._environment.close()
         await self._store.close()
         log.info("Engine stopped")
 
@@ -76,9 +78,18 @@ class Engine:
         phases = self._planner.plan()
         summary: Dict = {"phases": phases, "opportunities": 0, "executed": 0, "pnl": 0.0}
 
-        # 1. Poll books (including cross pairs for triangular)
-        books = await self._poll_books()
+        # 1. Poll environment (market data, news, health, regime)
+        env_state = await self._environment.poll()
+        books = env_state.market.books
         summary["books"] = len(books)
+        summary["regime"] = env_state.regime.value
+        summary["healthy_venues"] = env_state.healthy_venues
+        summary["news_alerts"] = len(env_state.news)
+        summary["critical_news"] = len(env_state.critical_news)
+        summary["exchange_health"] = {
+            v: h.status for v, h in env_state.exchange_health.items()
+        }
+        await self._bus.publish("environment", env_state.summary())
 
         # 2. Scan (cross-venue)
         opportunities = self._scanner.scan(books)
@@ -131,34 +142,15 @@ class Engine:
         return summary
 
     async def _poll_books(self) -> Dict[Tuple[str, str], Book]:
-        """Fetch books for all venue/symbol combinations.
+        """Fetch books via the environment's market feed.
 
-        Includes both default symbols (ERG/USDT, XMR/USDT) and triangular
-        cross-pair symbols (XMR/ERG, ERG/XMR) for triangular arb scanning.
+        Includes both default symbols and triangular cross-pairs.
         """
-        books: Dict[Tuple[str, str], Book] = {}
-        tasks = []
-        keys = []
-        # Build list of symbols: default + triangular cross-pairs
-        symbols = list(self.DEFAULT_SYMBOLS)
-        if self._settings.triangular_enabled:
-            for sym in self._settings.triangular_symbols:
-                if sym not in symbols:
-                    symbols.append(sym)
-        for venue in self._settings.venues:
-            for symbol in symbols:
-                keys.append((venue, symbol))
-                tasks.append(self._fetch_safe(venue, symbol))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for (venue, symbol), result in zip(keys, results):
-            if isinstance(result, Exception):
-                log.debug("Failed to fetch %s %s: %s", venue, symbol, result)
-                continue
-            books[(venue, symbol)] = result
-        return books
+        return await self._environment._market.poll_books()
 
     async def _fetch_safe(self, venue: str, symbol: str) -> Book:
-        return await self._gateway.fetch_book(venue, symbol)
+        """Fetch a single book via the gateway."""
+        return await self._environment._market._gateway.fetch_book(venue, symbol)
 
     async def run_forever(self, interval: float = 5.0) -> None:
         """Run cycles forever, *interval* seconds apart."""

@@ -4,6 +4,7 @@ Usage:
     python main.py              # run paper engine in a loop
     python main.py --scan       # one-shot spread matrix, no execution
     python main.py --triangular # one-shot triangular arb scan
+    python main.py --env        # one-shot environment snapshot
     python main.py --dry-run    # evaluate but do not execute
     python main.py --once       # single cycle, then exit
 """
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="AlMuden crypto arbitrage engine")
     p.add_argument("--scan", action="store_true", help="Print spread matrix and exit")
     p.add_argument("--triangular", action="store_true", help="Print triangular arb opportunities and exit")
+    p.add_argument("--env", action="store_true", help="Print environment snapshot and exit")
     p.add_argument("--dry-run", action="store_true", help="Evaluate but do not execute")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
     p.add_argument("--interval", type=float, default=5.0, help="Cycle interval in seconds")
@@ -93,6 +95,40 @@ async def run_triangular(settings) -> None:
     await gateway.close()
 
 
+async def run_env(settings) -> None:
+    """Poll the environment and print a snapshot."""
+    from environment import Environment
+
+    env = Environment(settings)
+    try:
+        state = await env.poll()
+
+        print("\n=== Environment Snapshot ===")
+        print(f"Regime: {state.regime.value}")
+        print(f"Timestamp: {state.timestamp}")
+
+        print(f"\n--- Market ({len(state.market.books)} books) ---")
+        for (venue, symbol), book in sorted(state.market.books.items()):
+            print(f"  {venue} {symbol}: bid={book.best_bid} ask={book.best_ask}")
+
+        print(f"\n--- Exchange Health ---")
+        for venue, health in sorted(state.exchange_health.items()):
+            print(f"  {health}")
+
+        print(f"\n--- News ({len(state.news)} items) ---")
+        for item in state.news:
+            print(f"  {item}")
+
+        print(f"\n--- Sentiment ---")
+        for asset, score in sorted(state.sentiment.items()):
+            print(f"  {score}")
+
+        if state.has_critical_news:
+            print("\n⚠️  CRITICAL NEWS DETECTED - Trading may be restricted")
+    finally:
+        await env.close()
+
+
 async def run_dry_run(settings) -> None:
     """Run one cycle without executing trades."""
     engine = Engine(settings)
@@ -131,6 +167,10 @@ async def main() -> int:
 
     if args.triangular:
         await run_triangular(settings)
+        return 0
+
+    if args.env:
+        await run_env(settings)
         return 0
 
     if args.dry_run:

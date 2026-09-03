@@ -110,6 +110,11 @@ class Settings:
         default_factory=lambda: ["XMR/ERG", "ERG/XMR"]
     )
 
+    # ── Environment / market intelligence ────────────────────────────
+    news_poll_interval: float = 60.0  # Seconds between news polls
+    regime_lookback: int = 20  # Observations for regime detection
+    sentiment_threshold: float = 0.3  # Minimum absolute sentiment to report
+
     # ── Live trading kill switch ─────────────────────────────────────
     live_enabled: bool = False
     live_kill_switch: bool = False
@@ -168,6 +173,9 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         triangular_symbols=_getlist(
             "ALMUDEN_TRIANGULAR_SYMBOLS", ["XMR/ERG", "ERG/XMR"]
         ),
+        news_poll_interval=_getfloat("ALMUDEN_NEWS_POLL_INTERVAL", 60.0),
+        regime_lookback=_getint("ALMUDEN_REGIME_LOOKBACK", 20),
+        sentiment_threshold=_getfloat("ALMUDEN_SENTIMENT_THRESHOLD", 0.3),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
