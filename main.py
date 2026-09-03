@@ -5,6 +5,9 @@ Usage:
     python main.py --scan       # one-shot spread matrix, no execution
     python main.py --triangular # one-shot triangular arb scan
     python main.py --env        # one-shot environment snapshot
+    python main.py --strategies # list available strategies
+    python main.py --backtest <strategy> --start <date> --end <date>
+    python main.py --simulate <strategy> --start <date> --end <date>
     python main.py --dry-run    # evaluate but do not execute
     python main.py --once       # single cycle, then exit
 """
@@ -34,6 +37,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan", action="store_true", help="Print spread matrix and exit")
     p.add_argument("--triangular", action="store_true", help="Print triangular arb opportunities and exit")
     p.add_argument("--env", action="store_true", help="Print environment snapshot and exit")
+    p.add_argument("--strategies", action="store_true", help="List available strategies and exit")
+    p.add_argument("--backtest", type=str, metavar="STRATEGY", help="Backtest a strategy (requires --start and --end)")
+    p.add_argument("--simulate", type=str, metavar="STRATEGY", help="Run Monte Carlo simulation (requires --start and --end)")
+    p.add_argument("--venue", type=str, default="kucoin", help="Exchange to use for backtest (default: kucoin)")
+    p.add_argument("--symbol", type=str, default="ERG/USDT", help="Symbol to backtest (default: ERG/USDT)")
+    p.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
+    p.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
+    p.add_argument("--draws", type=int, help="Number of Monte Carlo draws")
     p.add_argument("--dry-run", action="store_true", help="Evaluate but do not execute")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
     p.add_argument("--interval", type=float, default=5.0, help="Cycle interval in seconds")
@@ -129,6 +140,111 @@ async def run_env(settings) -> None:
         await env.close()
 
 
+async def run_strategies(settings) -> None:
+    """List available strategies."""
+    from strategy_lab import create_registry
+
+    registry = create_registry(settings)
+    strategies = registry.available()
+    if not strategies:
+        print("No strategies registered.")
+    else:
+        print("\nAvailable strategies:")
+        for name in strategies:
+            print(f"  - {name}")
+
+
+async def run_backtest(settings, strategy_name, venue, symbol, start, end) -> None:
+    """Run a backtest for a strategy."""
+    from strategy_lab import create_registry
+    from strategy_lab.backtester import Backtester
+
+    if not start or not end:
+        print("Error: --start and --end are required for backtest")
+        return
+
+    registry = create_registry(settings)
+    try:
+        strategy = registry.get(strategy_name)
+    except KeyError:
+        print(f"Error: Unknown strategy '{strategy_name}'")
+        print(f"Available: {registry.available()}")
+        return
+
+    print(f"\nBacktesting {strategy_name} on {venue} {symbol} ({start} to {end})...")
+
+    backtester = Backtester(settings)
+    result = backtester.run(strategy, venue, symbol, start, end)
+
+    print(f"\nBacktest Results: {result.strategy}")
+    print(f"Venue: {result.venue}")
+    print(f"Symbol: {result.symbol}")
+    print(f"Period: {result.start_date} to {result.end_date}")
+    print(f"Total trades: {result.total_trades}")
+    print(f"Total PnL: {result.total_pnl:.4f}")
+
+    if result.metrics:
+        print(f"\nMetrics:")
+        from strategy_lab.performance import format_metrics
+        print(format_metrics(result.metrics))
+
+
+async def run_simulate(settings, strategy_name, venue, symbol, start, end, draws) -> None:
+    """Run Monte Carlo simulation."""
+    from strategy_lab import create_registry
+    from strategy_lab.backtester import Backtester
+    from strategy_lab.simulator import Simulator
+
+    if not start or not end:
+        print("Error: --start and --end are required for simulation")
+        return
+
+    registry = create_registry(settings)
+    try:
+        strategy = registry.get(strategy_name)
+    except KeyError:
+        print(f"Error: Unknown strategy '{strategy_name}'")
+        print(f"Available: {registry.available()}")
+        return
+
+    print(f"\nRunning Monte Carlo for {strategy_name} ({draws} draws)...")
+
+    # First run backtest to get trades
+    backtester = Backtester(settings)
+    result = backtester.run(strategy, venue, symbol, start, end)
+
+    if not result.trades:
+        print("No trades to simulate. Try a different period or strategy.")
+        return
+
+    # Run simulation
+    simulator = Simulator(settings)
+    sim_result = simulator.run(
+        strategy_name=result.strategy,
+        trades=result.trades,
+        num_draws=draws,
+    )
+
+    print(f"\nMonte Carlo Results: {sim_result.strategy}")
+    print(f"Draws: {sim_result.num_draws}")
+    print(f"Initial balance: {sim_result.initial_balance:.2f}")
+    print(f"Mean final balance: {sim_result.mean_final_balance:.2f}")
+    print(f"Median final balance: {sim_result.median_final_balance:.2f}")
+    print(f"Worst case: {sim_result.worst_case:.2f}")
+    print(f"Best case: {sim_result.best_case:.2f}")
+    print(f"Probability of profit: {sim_result.probability_of_profit:.1f}%")
+
+    if sim_result.metrics:
+        print(f"\nMetrics:")
+        from strategy_lab.performance import format_metrics
+        print(format_metrics(sim_result.metrics))
+
+    if sim_result.percentiles:
+        print(f"\nPercentiles:")
+        for p, v in sorted(sim_result.percentiles.items()):
+            print(f"  {p}: {v:.2f}")
+
+
 async def run_dry_run(settings) -> None:
     """Run one cycle without executing trades."""
     engine = Engine(settings)
@@ -171,6 +287,23 @@ async def main() -> int:
 
     if args.env:
         await run_env(settings)
+        return 0
+
+    if args.strategies:
+        await run_strategies(settings)
+        return 0
+
+    if args.backtest:
+        await run_backtest(
+            settings, args.backtest, args.venue, args.symbol, args.start, args.end
+        )
+        return 0
+
+    if args.simulate:
+        draws = args.draws or settings.monte_carlo_draws
+        await run_simulate(
+            settings, args.simulate, args.venue, args.symbol, args.start, args.end, draws
+        )
         return 0
 
     if args.dry_run:

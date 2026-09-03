@@ -115,6 +115,10 @@ class Settings:
     regime_lookback: int = 20  # Observations for regime detection
     sentiment_threshold: float = 0.3  # Minimum absolute sentiment to report
 
+    # ── Strategy lab / backtesting ──────────────────────────────────
+    backtest_cache_dir: str = ".cache"  # Directory for cached OHLCV data
+    monte_carlo_draws: int = 1000  # Default number of simulation runs
+
     # ── Live trading kill switch ─────────────────────────────────────
     live_enabled: bool = False
     live_kill_switch: bool = False
@@ -176,6 +180,8 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         news_poll_interval=_getfloat("ALMUDEN_NEWS_POLL_INTERVAL", 60.0),
         regime_lookback=_getint("ALMUDEN_REGIME_LOOKBACK", 20),
         sentiment_threshold=_getfloat("ALMUDEN_SENTIMENT_THRESHOLD", 0.3),
+        backtest_cache_dir=_get("ALMUDEN_BACKTEST_CACHE_DIR", ".cache"),
+        monte_carlo_draws=_getint("ALMUDEN_MONTE_CARLO_DRAWS", 1000),
         live_enabled=live_enabled,
         live_kill_switch=live_kill_switch,
         redis_url=_get("ALMUDEN_REDIS_URL", ""),
