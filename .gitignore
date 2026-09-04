@@ -12,6 +12,11 @@ env/
 ENV/
 
 # Environment & secrets
+# Runtime state (risk persistence, treasury, ledger snapshots)
+.memory/
+data/
+*.parquet
+
 .env
 .env.local
 *.pem

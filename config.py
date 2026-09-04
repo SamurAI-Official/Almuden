@@ -140,7 +140,9 @@ class Settings:
     max_open_orders: int = 5  # Max concurrent open orders
     max_consecutive_losses: int = 5  # Circuit breaker threshold
     max_venue_exposure: float = 500.0  # Max exposure per venue
-    max_errors_per_minute: int = 10  # Max API errors per minute
+    max_errors_per_minute: int = 10
+    error_window_seconds: float = 60  # Error-rate window length for the circuit breaker
+    permit_ttl_ms: int = 10000  # Execution permit lifetime before expiry
 
     # ── Capital scheduler ───────────────────────────────────────────
     capital_deploy_fraction: float = 0.05  # Start with 5% of capital
@@ -222,6 +224,8 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         max_consecutive_losses=_getint("ALMUDEN_MAX_CONSECUTIVE_LOSSES", 5),
         max_venue_exposure=_getfloat("ALMUDEN_MAX_VENUE_EXPOSURE", 500.0),
         max_errors_per_minute=_getint("ALMUDEN_MAX_ERRORS_PER_MINUTE", 10),
+        error_window_seconds=_getfloat("ALMUDEN_ERROR_WINDOW_SECONDS", 60),
+        permit_ttl_ms=_getint("ALMUDEN_PERMIT_TTL_MS", 10000),
         capital_deploy_fraction=_getfloat("ALMUDEN_CAPITAL_DEPLOY_FRACTION", 0.05),
         alert_webhook_url=_get("ALMUDEN_ALERT_WEBHOOK_URL", ""),
         telegram_bot_token=_get("ALMUDEN_TELEGRAM_BOT_TOKEN", ""),

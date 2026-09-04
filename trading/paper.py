@@ -89,6 +89,7 @@ class PaperBroker:
             proceeds=fill_proceeds,
             order_id=intent.id,
             status="filled",
+            metadata=dict(intent.metadata or {}),
         )
         self._fills.append(fill)
         log.debug("Paper fill: %s", fill)

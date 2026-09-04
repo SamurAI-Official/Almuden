@@ -44,6 +44,25 @@ class Engine:
         # Strategy lab replaces scanner/evaluator/executor
         self._registry = create_registry(settings)
         self._broker = PaperBroker(settings)
+        # RiskGate is the ONLY route to the broker (risk, capital, breaker).
+        from trading.audit import AuditLog
+        from trading.risk_gate import RiskGate
+        self._audit = AuditLog(settings)
+        self._risk_gate = RiskGate(settings, audit=self._audit)
+        # Ledger: exchange-confirmed fills are the accounting source of truth.
+        from trading.ledger import Ledger
+        self._ledger = Ledger(settings)
+        # ExecutionCoordinator: state-machine two-leg execution with
+        # leg-failure recovery and restart safety (WP-3).
+        from trading.execution_coordinator import ExecutionCoordinator
+        self._coordinator = ExecutionCoordinator(
+            settings, self._broker, self._ledger, audit=self._audit,
+        )
+        # Treasury: the economic core — strategies draw allocations, never
+        # own capital. High-water-mark compounding (WP-7).
+        from trading.treasury import Treasury
+        self._treasury = Treasury(settings)
+        self._last_equity: float = 0.0
         # Rebalancer for inventory management
         from trading.arbitrage.rebalancer import Rebalancer
         self._rebalancer = Rebalancer(settings)
@@ -52,6 +71,13 @@ class Engine:
     async def start(self) -> None:
         self._running = True
         await self._bus.start()
+        # Resume any executions interrupted by a restart (leg-risk safety).
+        recovered = self._coordinator.recover_pending()
+        if recovered:
+            log.warning(
+                "%d in-flight execution(s) recovered from previous session",
+                len(recovered),
+            )
         log.info("Engine started (mode=%s, venues=%s)", self._settings.mode, self._settings.venues)
 
     async def stop(self) -> None:
@@ -110,66 +136,124 @@ class Engine:
         return summary
 
     async def _execute_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
-        """Execute opportunities using the unified broker interface."""
-        from trading.core import OrderIntent
-        
+        """Execute opportunities via the RiskGate — the ONLY route to the broker.
+
+        Flow per opportunity:
+              opportunity
+                -> RiskGate.authorize()      (risk + capital + circuit breaker)
+                -> ExecutionPermit
+                -> ExecutionCoordinator      (state machine, leg-risk protected)
+                     leg A: buy on buy_venue
+                     leg B: sell ACTUAL bought quantity on sell_venue
+                     on leg-B failure: emergency hedge on buy_venue
+                -> Ledger                    (confirmed fills, round trips)
+                -> Treasury                  (strategy P&L, compounding)
+                -> RiskGate.release(pnl)
+        """
+        from trading.portfolio import Portfolio
+
+        # Compute current equity + mark prices once per cycle.
+        balances = self._broker.all_balances()
+        mark_prices = {}
+        last_state = getattr(self._environment, "last_state", None)
+        books = (
+            last_state.market.books
+            if last_state is not None and hasattr(last_state, "market")
+            else {}
+        )
+        for (_venue, _symbol), book in books.items():
+            if book.mid:
+                base = _symbol.split("/")[0]
+                mark_prices[base] = book.mid
+        portfolio = Portfolio(balances, mark_prices)
+        current_equity = portfolio.total_value
+        self._last_equity = current_equity
+        self._risk_gate.update_equity(current_equity)
+        self._risk_gate.provide_mark_prices(mark_prices)
+        # Treasury seeds its buckets once (idempotent) from initial equity.
+        self._treasury.initialize(current_equity)
+
         results = []
         for opp in opportunities:
-            # Build OrderIntent from opportunity metadata
             opp_dict = opp if isinstance(opp, dict) else opp.to_dict()
             metadata = opp_dict.get("metadata", {})
             size = float(opp_dict.get("size", 0) or 0)
-            
-            # Determine if this is a cross-venue arb opportunity
+            symbol = opp_dict["symbol"]
+            strategy = opp_dict.get("strategy", "unknown")
+
             buy_venue = metadata.get("buy_venue")
             sell_venue = metadata.get("sell_venue")
-            if buy_venue and sell_venue and size > 0 and metadata.get("buy_price") and metadata.get("sell_price"):
-                # Cross-venue arbitrage: buy on cheap, sell on expensive
-                buy_intent = OrderIntent(
-                    venue=buy_venue, symbol=opp_dict["symbol"], side="buy",
-                    size=size, max_price=float(metadata.get("buy_price", 0)),
-                    ttl_ms=10000,
-                )
-                sell_intent = OrderIntent(
-                    venue=sell_venue, symbol=opp_dict["symbol"], side="sell",
-                    size=size, max_price=float(metadata.get("sell_price", 0)),
-                    min_output=size * float(metadata.get("sell_price", 0)) * 0.99,
-                    ttl_ms=10000,
-                )
-                
-                try:
-                    buy_fill = await self._broker.execute(buy_intent)
-                    sell_fill = await self._broker.execute(sell_intent)
-                    
-                    pnl = sell_fill.proceeds - buy_fill.cost
-                    results.append({
-                        "symbol": opp_dict["symbol"],
-                        "strategy": opp_dict.get("strategy", "unknown"),
-                        "buy_venue": buy_venue,
-                        "sell_venue": sell_venue,
-                        "pnl": pnl,
-                        "status": "executed",
-                        "buy_fill": buy_fill.__dict__,
-                        "sell_fill": sell_fill.__dict__,
-                    })
-                except Exception as exc:
-                    results.append({
-                        "symbol": opp_dict["symbol"],
-                        "strategy": opp_dict.get("strategy", "unknown"),
-                        "status": "error",
-                        "reason": str(exc),
-                        "pnl": 0.0,
-                    })
-            else:
-                # Non-arb opportunity or triangular — record but don't execute yet
+            buy_price = float(metadata.get("buy_price", 0) or 0)
+            sell_price = float(metadata.get("sell_price", 0) or 0)
+
+            if not (buy_venue and sell_venue and size > 0 and buy_price and sell_price):
                 results.append({
-                    "symbol": opp_dict["symbol"],
-                    "strategy": opp_dict.get("strategy", "unknown"),
+                    "symbol": symbol, "strategy": strategy,
                     "status": "skipped",
                     "reason": "no execution path for this opportunity type",
                     "pnl": 0.0,
                 })
-        
+                continue
+
+            # Single permit authorizes the whole two-leg cycle.
+            permit = await self._risk_gate.authorize(
+                opportunity=opp_dict,
+                venue=buy_venue,
+                symbol=symbol,
+                side="buy",
+                size=size,
+                limit_price=buy_price,
+                current_equity=current_equity,
+                current_positions=balances,
+                mark_prices=mark_prices,
+            )
+            if permit is None:
+                results.append({
+                    "symbol": symbol, "strategy": strategy,
+                    "status": "denied", "reason": "risk gate",
+                    "pnl": 0.0,
+                })
+                continue
+
+            try:
+                # State-machine round trip: leg A (buy) -> leg B (sell actual
+                # bought size) -> settled, with emergency hedge on leg-B
+                # failure. Partial leg-A fills cannot leave a residual.
+                execution = await self._coordinator.execute_round_trip(
+                    buy_permit=permit,
+                    sell_venue=sell_venue,
+                    sell_limit_price=sell_price,
+                    strategy=strategy,
+                )
+                realized = execution.pnl if execution.state.value in (
+                    "settled", "closed",
+                ) else 0.0
+
+                self._risk_gate.release(permit, realized)
+                self._treasury.record_return(strategy, realized)
+                self._audit.record("trade", {
+                    "permit_id": permit.permit_id,
+                    "execution_id": execution.execution_id,
+                    "state": execution.state.value,
+                    "symbol": symbol, "strategy": strategy,
+                    "pnl": round(realized, 6),
+                })
+                summary = execution.summary()
+                summary.update({
+                    "symbol": symbol, "strategy": strategy,
+                    "status": "executed" if realized or execution.settled
+                        else execution.state.value,
+                    "pnl": realized,
+                })
+                results.append(summary)
+            except Exception as exc:
+                self._risk_gate.record_error()
+                self._audit.record("trade_error", {
+                    "symbol": symbol, "strategy": strategy, "reason": str(exc),
+                })
+                results.append({"symbol": symbol, "strategy": strategy,
+                                "status": "error", "reason": str(exc), "pnl": 0.0})
+
         return results
 
     async def _poll_books(self) -> Dict[Tuple[str, str], Book]:

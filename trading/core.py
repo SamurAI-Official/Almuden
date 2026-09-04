@@ -130,3 +130,60 @@ class ExecutionPermit:
 
     def __repr__(self) -> str:
         return f"Permit({self.permit_id} {self.intent} size={self.approved_size:.6f})"
+
+
+class Opportunity:
+    """Universal opportunity object — the output of every strategy.
+
+    All strategies (CEX arb, triangular, Jupiter routing, Pump momentum,
+    trend, yield, rebalancing) emit this same shape, so opportunities from
+    any source compete for capital through the same allocator.
+    """
+
+    def __init__(
+        self,
+        strategy_id: str,
+        asset: str,
+        venues: List[str],
+        expected_return_bps: float,
+        worst_case_return_bps: float,
+        expected_cost_bps: float,
+        confidence: float,
+        liquidity: float,
+        time_to_live_ms: int,
+        capital_required: float,
+        risk_class: RiskClass = RiskClass.ARBITRAGE,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.strategy_id = strategy_id
+        self.asset = asset
+        self.venues = venues
+        self.expected_return_bps = expected_return_bps
+        self.worst_case_return_bps = worst_case_return_bps
+        self.expected_cost_bps = expected_cost_bps
+        self.confidence = max(0.0, min(1.0, confidence))
+        self.liquidity = liquidity
+        self.time_to_live_ms = time_to_live_ms
+        self.capital_required = capital_required
+        self.risk_class = risk_class
+        self.metadata = metadata or {}
+        self.created_at = time.time()
+
+    @property
+    def is_expired(self) -> bool:
+        return (time.time() - self.created_at) * 1000 > self.time_to_live_ms
+
+    @property
+    def net_expected_bps(self) -> float:
+        """Expected return after expected costs."""
+        return self.expected_return_bps - self.expected_cost_bps
+
+    def is_viable(self, min_net_bps: float = 0.0) -> bool:
+        """Worst case must still clear the minimum net edge."""
+        return self.worst_case_return_bps - self.expected_cost_bps >= min_net_bps
+
+    def __repr__(self) -> str:
+        return (
+            f"Opportunity({self.strategy_id} {self.asset} "
+            f"net={self.net_expected_bps:.1f}bps conf={self.confidence:.2f})"
+        )
