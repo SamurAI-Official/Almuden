@@ -6,30 +6,18 @@ and asset, fills at the quoted price plus a small simulated fee.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 from config import Settings
+from trading.core import Fill, OrderIntent
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class Fill:
-    venue: str
-    symbol: str
-    side: str  # "buy" | "sell"
-    size: float
-    price: float
-    fee: float
-    cost: float       # total quote outlay (buy: size*price + fee)
-    proceeds: float   # total quote received (sell: size*price - fee)
 
 
 class PaperBroker:
     """Simulated broker with per-venue balances."""
 
-    # Simulated taker fee in bps (matches conservative evaluator defaults)
+        # Simulated taker fee in bps (matches conservative evaluator defaults)
     FEE_BPS = 10.0
 
     def __init__(self, settings: Settings, initial_balance: float = 10_000.0) -> None:
@@ -37,6 +25,9 @@ class PaperBroker:
         self._initial = initial_balance
         self._balances: Dict[str, Dict[str, float]] = {}
         self._fills: list = []
+        # Seed with initial quote currency balance on a default venue
+        for v in settings.venues:
+            self._balances.setdefault(v, {})[settings.default_quote] = initial_balance
 
     def seed_balance(self, venue: str, asset: str, amount: float) -> None:
         """Pre-fund a venue with a starting balance."""
@@ -54,28 +45,51 @@ class PaperBroker:
     def fills(self) -> list:
         return list(self._fills)
 
-    def buy(self, venue: str, symbol: str, size: float, price: float) -> Fill:
+    async def execute(self, intent: OrderIntent) -> Fill:
+        """Execute a trading intent against the paper book.
+
+        Fills at the specified price (already validated by risk/engine)
+        minus a simulated fee.  Balances are adjusted accordingly.
+        """
+        symbol = intent.symbol
+        side = intent.side
+        size = intent.size
+        price = intent.max_price
+        venue = intent.venue
+
         base, quote = symbol.split("/")
         fee = size * price * self.FEE_BPS / 10_000.0
         cost = size * price + fee
-        bal = self._balances.setdefault(venue, {})
-        bal[quote] = bal.get(quote, 0.0) - cost
-        bal[base] = bal.get(base, 0.0) + size
-        fill = Fill(venue, symbol, "buy", size, price, fee, cost, 0.0)
-        self._fills.append(fill)
-        return fill
+        proceeds = size * price - fee if side == "sell" else 0.0
 
-    def sell(self, venue: str, symbol: str, size: float, price: float) -> Fill:
-        base, quote = symbol.split("/")
-        fee = size * price * self.FEE_BPS / 10_000.0
-        proceeds = size * price - fee
-        bal = self._balances.setdefault(venue, {})
-        bal[base] = bal.get(base, 0.0) - size
-        bal[quote] = bal.get(quote, 0.0) + proceeds
-        fill = Fill(venue, symbol, "sell", size, price, fee, 0.0, proceeds)
-        self._fills.append(fill)
-        return fill
+        # For buys, cost = size*price + fee; for sells, proceeds = size*price - fee
+        if side == "buy":
+            fill_cost = cost
+            fill_proceeds = 0.0
+        else:
+            fill_cost = 0.0
+            fill_proceeds = proceeds
 
-    def reset(self) -> None:
-        self._balances.clear()
-        self._fills.clear()
+        bal = self._balances.setdefault(venue, {})
+        if side == "buy":
+            bal[quote] = bal.get(quote, 0.0) - fill_cost
+            bal[base] = bal.get(base, 0.0) + size
+        else:
+            bal[base] = bal.get(base, 0.0) - size
+            bal[quote] = bal.get(quote, 0.0) + fill_proceeds
+
+        fill = Fill(
+            venue=venue,
+            symbol=symbol,
+            side=side,
+            size=size,
+            price=price,
+            fee=fee,
+            cost=fill_cost,
+            proceeds=fill_proceeds,
+            order_id=intent.id,
+            status="filled",
+        )
+        self._fills.append(fill)
+        log.debug("Paper fill: %s", fill)
+        return fill

@@ -65,10 +65,15 @@ class Executor:
         return self._balances
 
     def execute(self, opportunities: List[Dict]) -> List[CycleResult]:
-        """Execute the best opportunities up to the position cap."""
+        """Execute best opportunities up to the position cap."""
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(self.execute_async(opportunities))
+
+    async def execute_async(self, opportunities: List[Dict]) -> List[CycleResult]:
+        """Execute best opportunities up to the position cap (async)."""
         results: List[CycleResult] = []
         for opp in opportunities:
-            result = self._try_execute(opp)
+            result = await self._try_execute_async(opp)
             results.append(result)
             if result.status == "executed":
                 log.info(
@@ -79,13 +84,15 @@ class Executor:
                 )
         return results
 
-    def _try_execute(self, opp: Dict) -> CycleResult:
+    async def _try_execute_async(self, opp: Dict) -> CycleResult:
+        """Execute a single opportunity using the unified OrderIntent interface."""
+        from trading.core import OrderIntent
+        
         symbol = opp["symbol"]
         buy_venue = opp["buy_venue"]
         sell_venue = opp["sell_venue"]
         base, quote = symbol.split("/")
 
-        # Size the trade conservatively.
         size = self._size(opp, base, quote)
         if size <= 0:
             return CycleResult(
@@ -112,10 +119,20 @@ class Executor:
                 pnl=0, status="rejected", reason=f"insufficient {base} on {sell_venue}",
             )
 
-        # Execute via broker.
+        # Build OrderIntents for both legs
+        buy_intent = OrderIntent(
+            venue=buy_venue, symbol=symbol, side="buy",
+            size=size, max_price=opp["buy_price"], ttl_ms=10000,
+        )
+        sell_intent = OrderIntent(
+            venue=sell_venue, symbol=symbol, side="sell",
+            size=size, max_price=opp["sell_price"], min_output=size * opp["sell_price"],
+            ttl_ms=10000,
+        )
+
         try:
-            buy_fill = self._broker.buy(buy_venue, symbol, size, opp["buy_price"])
-            sell_fill = self._broker.sell(sell_venue, symbol, size, opp["sell_price"])
+            buy_fill = await self._broker.execute(buy_intent)
+            sell_fill = await self._broker.execute(sell_intent)
         except Exception:
             log.exception("Execution failed for %s", symbol)
             return CycleResult(
@@ -125,7 +142,7 @@ class Executor:
                 pnl=0, status="error", reason="broker error",
             )
 
-        # Update balances.
+        # Update balances from actual fills
         self._balances.add(buy_venue, quote, -buy_fill.cost)
         self._balances.add(buy_venue, base, buy_fill.size)
         self._balances.add(sell_venue, base, -sell_fill.size)
@@ -138,6 +155,11 @@ class Executor:
             edge_bps=opp.get("edge_bps", 0), net_edge_bps=opp.get("net_edge_bps", 0),
             pnl=pnl, status="executed",
         )
+
+    def _try_execute(self, opp: Dict) -> CycleResult:
+        """Synchronous wrapper for backward compatibility."""
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(self._try_execute_async(opp))
 
     def _size(self, opp: Dict, base: str, quote: str) -> float:
         """Conservative size: min(book depth, position cap / price)."""

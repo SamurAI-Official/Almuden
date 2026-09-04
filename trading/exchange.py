@@ -154,6 +154,15 @@ class ExchangeGateway:
         exchange = await self._get_exchange(venue)
         return await exchange.create_market_order(symbol, side, amount)
 
+    async def fetch_order_fills(
+        self, venue: str, order_id: str, symbol: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch individual fills for a given order ID."""
+        exchange = await self._get_exchange(venue)
+        return await exchange.fetch_order_fills(
+            symbol, since=None, limit=None, params={"orderId": order_id}
+        )
+
     async def close(self) -> None:
         for exchange in self._exchanges.values():
             await exchange.close()

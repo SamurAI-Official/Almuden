@@ -103,7 +103,7 @@ class Engine:
 
         # 4. Execute (cross-venue)
         if scored:
-            results = self._executor.execute(scored)
+            results = await self._executor.execute_async(scored)
             summary["executed"] = sum(1 for r in results if r.status == "executed")
             summary["pnl"] = sum(r.pnl for r in results)
             await self._bus.publish("execute", {"results": results})

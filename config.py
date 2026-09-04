@@ -85,8 +85,11 @@ class ExchangeKeys:
 class Settings:
     """All runtime settings, populated from env / .env."""
 
+            
     # ── Mode ────────────────────────────────────────────────────────
     mode: str = "paper"  # paper | live
+    default_quote: str = "USDT"  # Default quote currency for seeding balances
+
 
     # ── Venues & symbols ────────────────────────────────────────────
     venues: List[str] = field(
