@@ -72,14 +72,34 @@ def create_app(
 
     @app.get("/api/status")
     async def get_status(api_key: str = Depends(verify_api_key)):
-        """Get system status."""
+        """Get system status: engine, risk gate, treasury, last cycle."""
         status = {
             "running": False,
             "mode": "paper",
         }
         if engine:
             status["running"] = getattr(engine, "_running", False)
+            status["paused"] = getattr(engine, "paused", False)
             status["mode"] = getattr(engine._settings, "mode", "paper")
+            # Risk gate aggregates breaker + kill switch + risk state
+            if hasattr(engine, "_risk_gate"):
+                status["risk"] = engine._risk_gate.get_status()
+            # Treasury snapshot (allocations, tiers, net worth)
+            if hasattr(engine, "_treasury"):
+                try:
+                    status["treasury"] = engine._treasury.summary()
+                except TypeError:
+                    status["treasury"] = None
+            # Ledger truth: realized PnL, fees, fill count
+            if hasattr(engine, "_ledger"):
+                status["ledger"] = {
+                    "realized_pnl": engine._ledger.realized_pnl,
+                    "fees_paid": engine._ledger.fees_paid,
+                    "fill_count": engine._ledger.fill_count,
+                }
+            # Last completed cycle summary
+            if hasattr(engine, "last_summary"):
+                status["last_cycle"] = engine.last_summary
         if agent_system:
             status["agent_system"] = {
                 "brain_available": await agent_system.brain.is_available(),
@@ -89,24 +109,34 @@ def create_app(
 
     @app.get("/api/positions")
     async def get_positions(api_key: str = Depends(verify_api_key)):
-        """Get current positions (paper balances per venue)."""
+        """Get current positions: broker balances + ledger-confirmed positions."""
+        out = {}
         if engine and hasattr(engine, "_broker"):
-            return engine._broker.all_balances()
-        return {}
+            out["broker"] = engine._broker.all_balances()
+        if engine and hasattr(engine, "_ledger"):
+            # Ledger positions are the venue-confirmed source of truth
+            out["ledger"] = engine._ledger.positions
+        return out
 
     @app.get("/api/trades")
     async def get_trades(limit: int = 50, api_key: str = Depends(verify_api_key)):
-        """Get recent trades."""
-        if engine and hasattr(engine, "_broker"):
-            fills = engine._broker.fills[-limit:]
+        """Get recent venue-confirmed fills from the ledger."""
+        if engine and hasattr(engine, "_ledger"):
+            fills = engine._ledger.fills[-limit:]
             return [
                 {
-                    "venue": f.venue,
-                    "symbol": f.symbol,
-                    "side": f.side,
-                    "size": f.size,
-                    "price": f.price,
-                    "fee": f.fee,
+                    "t": f.get("t"),
+                    "venue": f.get("venue"),
+                    "symbol": f.get("symbol"),
+                    "side": f.get("side"),
+                    "size": f.get("size"),
+                    "price": f.get("price"),
+                    "fee": f.get("fee"),
+                    "cost": f.get("cost"),
+                    "proceeds": f.get("proceeds"),
+                    "status": f.get("status"),
+                    "slippage_bps": f.get("slippage_bps"),
+                    "strategy": f.get("strategy"),
                 }
                 for f in fills
             ]
@@ -132,29 +162,35 @@ def create_app(
 
     @app.post("/api/pause")
     async def pause(api_key: str = Depends(verify_api_key)):
-        """Pause the engine."""
+        """Pause the engine cycle loop (state preserved, restartable)."""
         if engine:
-            engine._running = False
+            engine.pause(reason="api")
             return {"status": "paused"}
         return {"status": "no_engine"}
 
     @app.post("/api/resume")
     async def resume(api_key: str = Depends(verify_api_key)):
-        """Resume the engine."""
+        """Resume the engine cycle loop after a pause."""
         if engine:
-            engine._running = True
+            engine.resume(reason="api")
             return {"status": "resumed"}
         return {"status": "no_engine"}
 
     @app.post("/api/kill-switch")
     async def kill_switch(api_key: str = Depends(verify_api_key)):
-        """Engage the kill switch."""
-        if engine and hasattr(engine, "_broker"):
-            broker = engine._broker
-            if hasattr(broker, "_kill_switch"):
-                setattr(broker, "_kill_switch", True)
-                return {"status": "kill_switch_engaged"}
-            return {"status": "kill_switch_not_supported"}
+        """Engage the kill switch (persistent; blocks all new execution)."""
+        if engine and hasattr(engine, "_risk_gate"):
+            engine._risk_gate.engage_kill_switch(reason="api")
+            engine.pause(reason="kill_switch")
+            return {"status": "kill_switch_engaged", "persistent": True}
+        return {"status": "no_engine"}
+
+    @app.post("/api/kill-switch/reset")
+    async def kill_switch_reset(api_key: str = Depends(verify_api_key)):
+        """Disengage the kill switch (explicit operator action)."""
+        if engine and hasattr(engine, "_risk_gate"):
+            engine._risk_gate.disengage_kill_switch(reason="api_reset")
+            return {"status": "kill_switch_disengaged"}
         return {"status": "no_engine"}
 
     @app.get("/api/config")

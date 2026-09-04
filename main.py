@@ -326,8 +326,8 @@ async def run_server(settings) -> None:
     # Start engine in background
     asyncio.create_task(engine.run_forever(interval=settings.interval))
 
-    # Run server (blocking)
-    server.run()
+    # Run server inside the already-running event loop
+    await server.serve()
 
 
 async def main() -> int:
@@ -373,7 +373,17 @@ async def main() -> int:
         return 0
 
     if args.kill_switch:
-        print("Kill switch engaged. Set ALMUDEN_LIVE_KILL_SWITCH=true to activate.")
+        from trading.risk_gate import RiskGate
+
+        gate = RiskGate(settings)
+        gate.engage_kill_switch("cli")
+        print(
+            "Kill switch ENGAGED (persisted to disk).\n"
+            "The engine will refuse to execute any trade until it is disengaged\n"
+            "via the dashboard/API (POST /api/control/resume) or by re-running\n"
+            "with ALMUDEN_LIVE_KILL_SWITCH=false after removing the persisted\n"
+            "state. Disengage deliberately: this state is the safety mechanism."
+        )
         return 0
 
     engine = Engine(settings)

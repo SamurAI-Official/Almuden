@@ -14,7 +14,9 @@ No other code path may call the broker. This module owns that boundary.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from config import Settings
@@ -43,6 +45,55 @@ class RiskGate:
         self._capital = CapitalScheduler(settings, initial_tier=initial_tier)
         self._breaker = CircuitBreaker(settings)
         self._audit = audit or AuditLog(settings)
+        # Kill switch persists to disk: an engaged switch MUST survive a
+        # restart (review item: "restarting AlMuden must never reset risk").
+        self._kill_path = os.path.join(
+            getattr(settings, "memory_dir", ".memory"), "kill_switch.json"
+        )
+        self._kill_engaged = self._load_kill_switch() or bool(
+            getattr(settings, "live_kill_switch", False)
+        )
+        if self._kill_engaged:
+            log.warning("KILL SWITCH ENGAGED at startup (persisted or env).")
+
+    # -- Kill switch (hard stop) ------------------------------------------
+
+    def _load_kill_switch(self) -> bool:
+        try:
+            if os.path.exists(self._kill_path):
+                with open(self._kill_path, "r", encoding="utf-8") as fh:
+                    return bool(json.load(fh).get("engaged", False))
+        except (OSError, ValueError) as exc:
+            log.error("Failed to load kill-switch state: %s", exc)
+        return False
+
+    def _save_kill_switch(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._kill_path), exist_ok=True)
+            with open(self._kill_path, "w", encoding="utf-8") as fh:
+                json.dump({"engaged": self._kill_engaged}, fh)
+        except OSError as exc:
+            log.error("Failed to persist kill-switch state: %s", exc)
+
+    @property
+    def kill_switch_engaged(self) -> bool:
+        return self._kill_engaged
+
+    def engage_kill_switch(self, reason: str = "manual") -> None:
+        """Engage the hard stop. Idempotent; persists across restarts."""
+        if not self._kill_engaged:
+            self._kill_engaged = True
+            self._save_kill_switch()
+            self._audit.record("kill_switch_engaged", {"reason": reason})
+            log.warning("KILL SWITCH ENGAGED: %s", reason)
+
+    def disengage_kill_switch(self, reason: str = "manual") -> None:
+        """Clear the hard stop. Requires explicit operator action."""
+        if self._kill_engaged:
+            self._kill_engaged = False
+            self._save_kill_switch()
+            self._audit.record("kill_switch_disengaged", {"reason": reason})
+            log.warning("Kill switch disengaged: %s", reason)
 
     # ── Readable status ─────────────────────────────────────────────
 
@@ -85,7 +136,9 @@ class RiskGate:
         """Run every pre-trade gate. Returns a valid permit or None."""
         # Hard kill switch: engaged => no permit, ever. Property (review
         # item 19): a kill switch can never be bypassed at the gate.
-        if getattr(self._settings, "live_kill_switch", False):
+        if self.kill_switch_engaged or getattr(
+            self._settings, "live_kill_switch", False
+        ):
             self._audit.record("risk_deny", {
                 "reason": "kill_switch_engaged",
                 "symbol": symbol, "strategy": (
@@ -177,6 +230,7 @@ class RiskGate:
     def get_status(self) -> Dict[str, Any]:
         """Combined status for API/logging."""
         return {
+            "kill_switch_engaged": self.kill_switch_engaged,
             "risk": self._risk.get_status(),
             "capital": self._capital.get_status(),
             "circuit_breaker": self._breaker.get_status(),

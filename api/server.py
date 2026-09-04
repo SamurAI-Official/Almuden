@@ -53,8 +53,33 @@ class APIServer:
     def api_key(self) -> str:
         return self._auth.api_key
 
+    def attach_engine_events(self, engine) -> None:
+        """Forward engine EventBus events to connected WebSocket clients."""
+        bus = getattr(engine, "bus", None)
+        if bus is None:
+            log.warning("Engine has no bus; WebSocket event forwarding disabled.")
+            return
+
+        def make_forwarder(topic: str):
+            async def forwarder(event: dict) -> None:
+                await self._ws_feed.broadcast(topic, event)
+            return forwarder
+
+        topics = ["environment", "scan", "execute", "rebalance"]
+        for topic in topics:
+            bus.subscribe(topic, make_forwarder(topic))
+        log.info("WebSocket feed attached to engine events: %s", topics)
+
+    async def serve(self) -> None:
+        """Run the server inside an already-running event loop."""
+        config = uvicorn.Config(
+            self._app, host=self._host, port=self._port, log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
     def run(self) -> None:
-        """Run the server (blocking)."""
+        """Run the server (blocking; for sync entrypoints)."""
         log.info("Starting API server on %s:%d", self._host, self._port)
-        log.info("API key: %s", self._api_key)
+        log.info("API key: %s", self.api_key)
         uvicorn.run(self._app, host=self._host, port=self._port)

@@ -58,7 +58,7 @@ class Engine:
         self._coordinator = ExecutionCoordinator(
             settings, self._broker, self._ledger, audit=self._audit,
         )
-        # Treasury: the economic core — strategies draw allocations, never
+        # Treasury: the economic core -- strategies draw allocations, never
         # own capital. High-water-mark compounding (WP-7).
         from trading.treasury import Treasury
         self._treasury = Treasury(settings)
@@ -67,6 +67,19 @@ class Engine:
         from trading.arbitrage.rebalancer import Rebalancer
         self._rebalancer = Rebalancer(settings)
         self._running = False
+        self._paused = False
+        self._last_summary: Dict = {}
+
+    # -- Public accessors -------------------------------------------------
+    @property
+    def bus(self) -> EventBus:
+        """Public access to the event bus (for API/WebSocket forwarding)."""
+        return self._bus
+
+    @property
+    def last_summary(self) -> Dict:
+        """Most recent cycle summary (read by the API layer)."""
+        return self._last_summary
 
     async def start(self) -> None:
         self._running = True
@@ -87,6 +100,26 @@ class Engine:
         await self._store.close()
         log.info("Engine stopped")
 
+    # -- Pause / resume (API control surface) ----------------------------
+    def pause(self, reason: str = "manual") -> None:
+        """Pause the cycle loop. Polling halts; state is preserved."""
+        self._paused = True
+        log.warning("Engine paused: %s", reason)
+
+    def resume(self, reason: str = "manual") -> None:
+        """Resume the cycle loop after a pause."""
+        self._paused = False
+        log.info("Engine resumed: %s", reason)
+
+    @property
+    def is_paused(self) -> bool:
+        return getattr(self, "_paused", False)
+
+    @property
+    def bus(self):
+        """Public event-bus accessor (API/WebSocket forwarding)."""
+        return self._bus
+
     async def run_once(self) -> Dict:
         """Run a single cycle and return a summary dict."""
         phases = self._planner.plan()
@@ -98,6 +131,7 @@ class Engine:
         if getattr(self._settings, "live_kill_switch", False):
             summary["status"] = "kill_switch_engaged"
             log.warning("Cycle skipped: live kill switch is engaged")
+            self._last_summary = summary
             return summary
 
         # 1. Poll environment (market data, news, health, regime)
@@ -141,6 +175,7 @@ class Engine:
         if actions:
             await self._bus.publish("rebalance", {"actions": actions})
 
+        self._last_summary = summary
         return summary
 
     async def _execute_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
@@ -295,6 +330,9 @@ class Engine:
         await self.start()
         try:
             while self._running:
+                if self._paused:
+                    await asyncio.sleep(1.0)
+                    continue
                 try:
                     summary = await self.run_once()
                     log.info("Cycle: %s", summary)

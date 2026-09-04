@@ -12,6 +12,7 @@
         .status-badge { padding: 5px 15px; border-radius: 20px; font-size: 14px; font-weight: bold; }
         .status-running { background: #00c853; color: #000; }
         .status-stopped { background: #ff5252; color: #fff; }
+        .status-paused { background: #ffab00; color: #000; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
         .card { background: #16213e; border-radius: 10px; padding: 20px; border: 1px solid #333; }
         .card h3 { color: #00d4ff; margin-bottom: 10px; }
@@ -24,7 +25,7 @@
         .warning { color: #ffab00; }
         .log { background: #0a0a1a; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; }
         .log-entry { padding: 2px 0; }
-        .controls { display: flex; gap: 10px; margin-top: 15px; }
+        .controls { display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
         .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
         .btn-primary { background: #00d4ff; color: #000; }
         .btn-danger { background: #ff5252; color: #fff; }
@@ -34,6 +35,8 @@
         .ws-status { font-size: 12px; color: #888; }
         .ws-connected { color: #00c853; }
         .ws-disconnected { color: #ff5252; }
+        .kill-active { background: #ff5252; color: #fff; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -50,15 +53,23 @@
             <h3>System Status</h3>
             <div class="metric"><span class="metric-label">Mode</span><span id="mode" class="metric-value">paper</span></div>
             <div class="metric"><span class="metric-label">Running</span><span id="running" class="metric-value">No</span></div>
+            <div class="metric"><span class="metric-label">Kill Switch</span><span id="kill-switch" class="metric-value">Disengaged</span></div>
             <div class="metric"><span class="metric-label">Brain Available</span><span id="brain" class="metric-value">Unknown</span></div>
             <div class="metric"><span class="metric-label">Active Strategies</span><span id="strategies" class="metric-value">-</span></div>
             <div class="metric"><span class="metric-label">Should Trade</span><span id="should-trade" class="metric-value">-</span></div>
         </div>
 
         <div class="card">
-            <h3>Market Overview</h3>
-            <div id="market-data">
-                <div class="metric"><span class="metric-label">Books</span><span class="metric-value">-</span></div>
+            <h3>Treasury</h3>
+            <div id="treasury">
+                <div class="metric"><span class="metric-label">Net Worth</span><span class="metric-value">-</span></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Risk Overview</h3>
+            <div id="risk">
+                <div class="metric"><span class="metric-label">Daily PnL</span><span class="metric-value">-</span></div>
             </div>
         </div>
 
@@ -66,72 +77,105 @@
             <h3>Positions</h3>
             <div id="positions"><p style="color: #888;">No positions</p></div>
         </div>
-
         <div class="card">
             <h3>Performance</h3>
             <div id="performance">
+                <div class="metric"><span class="metric-label">Total Trades</span><span class="metric-value">-</span></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Agent Plan</h3>
+            <div id="plan"><p style="color: #888;">No plan available</p></div>
+        </div>
+
+        <div class="card">
+            <h3>Controls</h3>
+            <div class="controls">
+                <button class="btn btn-primary" onclick="resume()">Resume</button>
+                <button class="btn btn-warning" onclick="pause()">Pause</button>
+                <button class="btn btn-danger" onclick="killSwitch()">Kill Switch</button>
+            </div>
+            <p style="margin-top: 10px; font-size: 12px; color: #888;">API Key: <span id="api-key">Set ?api_key=YOUR_KEY</span></p>
+        </div>
+
+        <div class="card" style="grid-column: span 2;">
+            <h3>Event Log</h3>
+            <div id="event-log" class="log"><div class="log-entry">Waiting...</div></div>
+        </div>
+    </div>
 
     <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const apiKey = urlParams.get('api_key') || '';
-        if (apiKey) document.getElementById('api-key').textContent = apiKey.substring(0, 8) + '...';
+        const apiKey = new URLSearchParams(window.location.search).get('api_key') || '';
+        document.getElementById('api-key').textContent = apiKey ? '***' + apiKey.slice(-4) : 'Set ?api_key=YOUR_KEY';
 
-        let ws = null, wsConnected = false;
-
+        async function apiCall(method, path, body) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['X-API-Key'] = apiKey;
+            const opts = { method, headers };
+            if (body) opts.body = JSON.stringify(body);
+            const r = await fetch(path, opts);
+            return r.json();
+        }
         function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${proto}//${location.host}/ws`;
+            const ws = new WebSocket(url);
             ws.onopen = () => {
-                wsConnected = true;
                 document.getElementById('ws-status').textContent = 'WS: Connected';
                 document.getElementById('ws-status').className = 'ws-status ws-connected';
-                ws.send(JSON.stringify({type: 'ping'}));
             };
             ws.onclose = () => {
-                wsConnected = false;
                 document.getElementById('ws-status').textContent = 'WS: Disconnected';
                 document.getElementById('ws-status').className = 'ws-status ws-disconnected';
                 setTimeout(connectWebSocket, 3000);
             };
-            ws.onmessage = (event) => {
-                try { handleEvent(JSON.parse(event.data)); } catch (e) {}
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                const log = document.getElementById('event-log');
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                entry.textContent = `[${new Date().toLocaleTimeString()}] ${data.topic || 'event'}: ${JSON.stringify(data.payload || data).slice(0, 100)}`;
+                log.insertBefore(entry, log.firstChild);
+                while (log.children.length > 50) log.removeChild(log.lastChild);
             };
-        }
-
-        function handleEvent(msg) {
-            const log = document.getElementById('event-log');
-            const entry = document.createElement('div');
-            entry.className = 'log-entry';
-            entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg.type}`;
-            log.insertBefore(entry, log.firstChild);
-            while (log.children.length > 100) log.removeChild(log.lastChild);
-        }
-
-        async function apiCall(method, path) {
-            try {
-                const resp = await fetch(path, { method, headers: { 'X-API-Key': apiKey } });
-                return await resp.json();
-            } catch (e) { return { error: e.message }; }
         }
 
         async function refreshStatus() {
             const s = await apiCall('GET', '/api/status');
-            document.getElementById('status-badge').textContent = s.running ? 'RUNNING' : 'STOPPED';
-            document.getElementById('status-badge').className = `status-badge ${s.running ? 'status-running' : 'status-stopped'}`;
-            document.getElementById('mode').textContent = s.mode || '-';
+            const badge = document.getElementById('status-badge');
+            badge.textContent = s.running ? (s.kill_switch ? 'KILL SWITCH' : 'RUNNING') : 'STOPPED';
+            badge.className = 'status-badge ' + (s.running ? (s.kill_switch ? 'kill-active' : 'status-running') : 'status-stopped');
+            document.getElementById('mode').textContent = s.mode;
             document.getElementById('running').textContent = s.running ? 'Yes' : 'No';
-            document.getElementById('brain').textContent = s.agent_system?.brain_available ? 'Yes' : 'No';
-            document.getElementById('strategies').textContent = s.agent_system?.last_plan?.strategies?.join(', ') || '-';
-            document.getElementById('should-trade').textContent = s.agent_system?.last_plan?.should_trade ? 'Yes' : 'No';
-        }
+            document.getElementById('kill-switch').textContent = s.kill_switch ? 'ENGAGED' : 'Disengaged';
+            document.getElementById('kill-switch').className = 'metric-value ' + (s.kill_switch ? 'negative' : '');
+            document.getElementById('brain').textContent = s.brain_available ? 'Yes' : 'No';
+            document.getElementById('strategies').textContent = s.strategies_active ?? '-';
+            document.getElementById('should-trade').textContent = s.should_trade ? 'Yes' : 'No';
 
+            const t = s.treasury || {};
+            document.getElementById('treasury').innerHTML = `
+                <div class="metric"><span class="metric-label">Net Worth</span><span class="metric-value">$${(t.net_worth||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Cash</span><span class="metric-value">$${(t.cash||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Unrealized PnL</span><span class="metric-value ${(t.unrealized_pnl||0)>=0?'positive':'negative'}">$${(t.unrealized_pnl||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Realized PnL</span><span class="metric-value ${(t.realized_pnl||0)>=0?'positive':'negative'}">$${(t.realized_pnl||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Tier</span><span class="metric-value">${t.tier||'-'}</span></div>`;
+
+            const r = s.risk || {};
+            document.getElementById('risk').innerHTML = `
+                <div class="metric"><span class="metric-label">Daily PnL</span><span class="metric-value ${(r.daily_pnl||0)>=0?'positive':'negative'}">$${(r.daily_pnl||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Max Drawdown</span><span class="metric-value negative">${(r.max_drawdown_pct||0).toFixed(1)}%</span></div>
+                <div class="metric"><span class="metric-label">Consecutive Losses</span><span class="metric-value">${r.consecutive_losses||0}</span></div>
+                <div class="metric"><span class="metric-label">Breaker Status</span><span class="metric-value">${r.breaker_status||'healthy'}</span></div>`;
+        }
         async function refreshPositions() {
-            const pos = await apiCall('GET', '/api/positions');
+            const p = await apiCall('GET', '/api/positions');
             const el = document.getElementById('positions');
             let html = '';
-            for (const [v, a] of Object.entries(pos)) {
-                for (const [asset, amt] of Object.entries(a)) {
-                    if (amt > 0) html += `<div class="metric"><span class="metric-label">${v} ${asset}</span><span class="metric-value">${amt.toFixed(4)}</span></div>`;
+            for (const [venue, assets] of Object.entries(p)) {
+                for (const [asset, amt] of Object.entries(assets)) {
+                    if (Math.abs(amt) > 0.0001) html += `<div class="metric"><span class="metric-label">${venue} ${asset}</span><span class="metric-value">${amt.toFixed(4)}</span></div>`;
                 }
             }
             el.innerHTML = html || '<p style="color:#888">No positions</p>';
@@ -139,11 +183,12 @@
 
         async function refreshMemory() {
             const m = await apiCall('GET', '/api/memory');
-            const p = m.performance || {};
+            const perf = m.performance || {};
             document.getElementById('performance').innerHTML = `
-                <div class="metric"><span class="metric-label">Total Trades</span><span class="metric-value">${p.total_trades||0}</span></div>
-                <div class="metric"><span class="metric-label">Win Rate</span><span class="metric-value">${(p.win_rate||0).toFixed(1)}%</span></div>
-                <div class="metric"><span class="metric-label">Total PnL</span><span class="metric-value ${(p.total_pnl||0)>=0?'positive':'negative'}">${(p.total_pnl||0).toFixed(4)}</span></div>`;
+                <div class="metric"><span class="metric-label">Total Trades</span><span class="metric-value">${perf.total_trades||0}</span></div>
+                <div class="metric"><span class="metric-label">Win Rate</span><span class="metric-value">${(perf.win_rate||0).toFixed(1)}%</span></div>
+                <div class="metric"><span class="metric-label">Total PnL</span><span class="metric-value ${(perf.total_pnl||0)>=0?'positive':'negative'}">$${(perf.total_pnl||0).toFixed(2)}</span></div>
+                <div class="metric"><span class="metric-label">Sharpe</span><span class="metric-value">${(perf.sharpe||0).toFixed(2)}</span></div>`;
         }
 
         async function refreshPlan() {
@@ -171,27 +216,3 @@
     </script>
 </body>
 </html>
-                <div class="metric"><span class="metric-label">Total Trades</span><span class="metric-value">-</span></div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>Agent Plan</h3>
-            <div id="plan"><p style="color: #888;">No plan available</p></div>
-        </div>
-
-        <div class="card">
-            <h3>Controls</h3>
-            <div class="controls">
-                <button class="btn btn-primary" onclick="resume()">Resume</button>
-                <button class="btn btn-warning" onclick="pause()">Pause</button>
-                <button class="btn btn-danger" onclick="killSwitch()">Kill Switch</button>
-            </div>
-            <p style="margin-top: 10px; font-size: 12px; color: #888;">API Key: <span id="api-key">Set ?api_key=YOUR_KEY</span></p>
-        </div>
-
-        <div class="card" style="grid-column: span 2;">
-            <h3>Event Log</h3>
-            <div id="event-log" class="log"><div class="log-entry">Waiting...</div></div>
-        </div>
-    </div>
