@@ -1,38 +1,48 @@
 # AlMuden
 
-An Ollama-driven multi-agent crypto trading system with ERG/XMR cross-venue
-and triangular arbitrage scraping.
+A continuously operating software agent that researches economic strategies,
+allocates bounded capital, executes through multiple venues, measures realized
+outcomes, stores experience, and progressively promotes or retires strategies.
 
-> **Status:** Phases 0–4 scaffolded (core engine, exchange adapters, arbitrage
-> scanner/evaluator/executor). The agents/LLM layer and live trading are
-> intentionally deferred — the system runs in **paper mode** by default.
+> **Status:** Phases 0-9 implemented. Core economic kernel, risk pipeline,
+> execution state machine, treasury, and research layer are live. The system
+> runs in **paper mode** by default. Live trading is hard-gated behind
+> explicit opt-in with persistent kill switch.
 
 ## Architecture
 
 ```
-AlMuden/
-├── main.py                    # CLI entrypoint
-├── config.py                  # Settings loader (.env aware)
-├── orchestrator/              # Engine loop, events, planner, scheduler
-├── trading/
-│   ├── exchange.py            # CCXT-backed venue gateway
-│   ├── arbitrage/             # Scanner → Evaluator → Executor → Rebalancer
-│   ├── paper.py               # Paper broker (default execution path)
-│   ├── live.py                # Live broker (Phase 7, hard-guarded)
-│   ├── strategies.py          # Strategy registry
-│   └── backtest.py            # Backtester (deferred)
-├── tools/
-│   ├── indicators.py          # Spread matrices, VWAP, slippage models
-│   └── news.py                # Delisting / withdrawal-suspension watch
-├── database/
-│   ├── redis.py               # Orderbook cache (in-memory fallback)
-│   ├── postgres.py            # Trade / PnL persistence (no-DB fallback)
-│   └── qdrant.py              # Vector store (deferred)
-├── agents/                    # LLM agents (deferred)
-├── brain/                     # Ollama prompts & embeddings (deferred)
-├── memory/                    # Episodic / semantic memory (deferred)
-└── api/                       # REST + WebSocket API (deferred)
+
+## Execution pipeline
+
 ```
+Strategy → TradeIntent → RiskEngine → CapitalScheduler → CircuitBreaker
+    → ExecutionPermit → Broker (Paper/Live) → Fill → Ledger → Treasury
+```
+
+**The strategy/agent never reaches the broker directly.** Only an
+`ExecutionPermit` can reach the signer/order router.
+
+## Risk system
+
+- **RiskEngine** — max drawdown, daily loss, consecutive losses, open order limits
+- **CapitalScheduler** — evidence-based tiers (RESEARCH 0% → CANARY 0.25-1% →
+  PROBATION 1-3% → VERIFIED 3-10% → PRODUCTION 10-25% → MATURE 25-100%)
+- **CircuitBreaker** — sliding-window aging, multiple breaker types
+- **Kill switch** — persists to disk, survives restarts
+- **Strategy Lifecycle** — 8-level promotion/demotion based on evidence
+
+## Research loop
+
+```
+OBSERVE → HYPOTHESIZE → EXPERIMENT → MEASURE → LEARN → MODIFY → REPEAT
+```
+
+1. **ShadowBroker** — records hypothetical executions without capital
+2. **WalkForwardAnalyzer** — rolling train/test validation
+3. **ResearchAgent** — observes market, generates hypotheses, tests them
+4. **MemoryStore** — persistent storage for research findings
+5. **StrategyLifecycle** — promotes strategies from RESEARCH to MATURE based on evidence
 
 ## Quick start
 
@@ -51,38 +61,46 @@ python main.py --scan
 
 # 5. Dry run (evaluate but do not execute)
 python main.py --dry-run
+
+# 6. Serve API + dashboard
+python main.py --serve
+
+# 7. Run tests
+python -m pytest tests/ -v
 ```
 
 ## Design decisions
 
-- **CCXT for all adapters** — one venue abstraction across KuCoin, Gate.io,
-  MEXC, Kraken, WhiteBIT.
-- **Inventory-based execution** — pre-positioned balances, no on-chain
-  transfers in the hot path. Two-leg cycles settle against the books.
-- **Fee-aware evaluator** — `net_edge = spread − fees − slippage − rebalance
-  amortization`. No trade clears the gate unless net edge is positive.
-- **Agents/LLM are advisory-only** — they never touch the order router.
-- **Paper mode by default** — `LIVE_KILL_SWITCH` must be explicitly enabled.
+- **Capital safety is architectural** — the risk pipeline is the only path to execution
+- **Paper mode by default** — `LIVE_KILL_SWITCH` must be explicitly enabled
+- **Inventory-based execution** — pre-positioned balances, no on-chain transfers in hot path
+- **Fee-aware evaluator** — `net_edge = spread − fees − slippage − rebalance amortization`
+- **CCXT for CEX adapters** — one venue abstraction across KuCoin, Gate.io, MEXC, Kraken, WhiteBIT
+- **Solana venues** — Jupiter Swap V2 (full execution), Pump (read-only quarantined)
+- **Strategies don't own capital** — the treasury owns capital, strategies request allocation
+- **Promotion is earned** — evidence-based, demotion is automatic
 
-## Market landscape (ERG / XMR)
+## Testing
 
-| Venue    | ERG pairs  | XMR pairs          | Notes |
-|----------|-----------|--------------------|-------|
-| KuCoin   | ERG/USDT  | XMR/USDT, XMR/BTC  | Only venue listing both → triangular route hub |
-| Gate.io  | ERG/USDT  | —                  | Thin depth |
-| MEXC     | ERG/USDT  | —                  | Deepest ERG book |
-| Kraken   | —         | XMR/USD, XMR/USDT  | Largest XMR liquidity |
-| WhiteBIT | —         | XMR/USDT           | Secondary XMR venue |
-
-No ERG↔XMR pair or production atomic swap exists. KuCoin is the overlap venue;
-XMR delisting/withdrawal monitoring is mandatory (Binance/OKX already delisted).
+```bash
+python -m pytest tests/ -v              # 43 tests (execution, invariants, shadow, venues)
+python tests/test_execution.py          # State-machine tests
+python tests/property/test_invariants.py  # Money-safety property tests
+python tests/test_shadow.py             # Shadow, lifecycle, memory, research tests
+```
 
 ## Roadmap
 
-- **Phase 0–4** ✅ — scaffold, engine, adapters, indicators, arbitrage engine
-- **Phase 5** — triangular ERG↔XMR design
-- **Phase 6** — backtest / paper gate
-- **Phase 7** — live trading + agent/LLM layer
+- **Phase 0-4** ✅ — Core domain model, venue abstraction, execution state machine
+- **Phase 5** ✅ — Historical backtesting, walk-forward analysis
+- **Phase 6** ✅ — Live shadow trading, paper broker
+- **Phase 7** ✅ — Jupiter integration
+- **Phase 8** ✅ — Pump market intelligence (read-only)
+- **Phase 9** ✅ — Strategy laboratory, research agent, memory layer
+- **Phase 10** — Full agent + LLM integration (Ollama)
+- **Phase 11** — Canary capital (live trading with tight limits)
+- **Phase 12** — Autonomous capital allocation
+- **Phase 13** — Strategy evolution (automated mutation/selection)
 
 ## License
 
