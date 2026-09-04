@@ -83,6 +83,19 @@ class RiskGate:
         mark_prices: Optional[Dict[str, float]] = None,
     ) -> Optional[ExecutionPermit]:
         """Run every pre-trade gate. Returns a valid permit or None."""
+        # Hard kill switch: engaged => no permit, ever. Property (review
+        # item 19): a kill switch can never be bypassed at the gate.
+        if getattr(self._settings, "live_kill_switch", False):
+            self._audit.record("risk_deny", {
+                "reason": "kill_switch_engaged",
+                "symbol": symbol, "strategy": (
+                    getattr(opportunity, "strategy", None)
+                    or (opportunity.get("strategy")
+                        if isinstance(opportunity, dict) else None)
+                    or "?"
+                ),
+            })
+            return None
         mark_prices = mark_prices or getattr(self, "_mark_prices", {})
         # Cap size by what capital allocation allows.
         max_capital = self._capital.get_max_capital()

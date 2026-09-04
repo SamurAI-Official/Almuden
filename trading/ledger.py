@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import Settings
 from trading.core import Fill
@@ -60,6 +60,10 @@ class Ledger:
         self._fills: List[Dict[str, Any]] = []
         self._realized_pnl: float = 0.0
         self._fees_paid: float = 0.0
+        # Idempotency guard: (venue, order_id) pairs already applied.
+        # A "transaction lands twice" or replayed duplicate can never
+        # double-count positions (adversarial review item 20).
+        self._seen_order_ids: Set[Tuple[str, str]] = set()
         self._load()
 
     # -- Persistence ---------------------------------------------------
@@ -115,7 +119,9 @@ class Ledger:
             "permit_id": permit_id,
             "metadata": dict(getattr(fill, "metadata", {}) or {}),
         }
-        self._fills.append(entry)
+        # _apply_fill_entry owns the _fills append (single source of truth)
+        # and the idempotency guard, so the same order can never be applied
+        # twice even if record_fill is replayed.
         self._apply_fill_entry(entry)
         self._append(entry)
         return entry
@@ -137,6 +143,13 @@ class Ledger:
             return
         if "venue" not in entry or "symbol" not in entry:
             return
+        # Idempotency: a replayed / double-reported order_id must not
+        # double-apply positions or fills.
+        dedupe_key = (entry["venue"], entry.get("order_id") or "")
+        if dedupe_key[1] and dedupe_key in self._seen_order_ids:
+            return
+        if dedupe_key[1]:
+            self._seen_order_ids.add(dedupe_key)
         self._fills.append(entry)
         venue, symbol = entry["venue"], entry["symbol"]
         side, size = entry["side"], entry["size"]

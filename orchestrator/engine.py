@@ -92,6 +92,14 @@ class Engine:
         phases = self._planner.plan()
         summary: Dict = {"phases": phases, "opportunities": 0, "executed": 0, "pnl": 0.0}
 
+        # Hard kill switch short-circuits the whole cycle (no polling, no
+        # scanning, no execution). Property (review item 20): a kill switch
+        # must stop the machine at the cycle boundary.
+        if getattr(self._settings, "live_kill_switch", False):
+            summary["status"] = "kill_switch_engaged"
+            log.warning("Cycle skipped: live kill switch is engaged")
+            return summary
+
         # 1. Poll environment (market data, news, health, regime)
         env_state = await self._environment.poll()
         books = env_state.market.books
@@ -151,6 +159,21 @@ class Engine:
                 -> RiskGate.release(pnl)
         """
         from trading.portfolio import Portfolio
+
+        # Defense in depth: even a direct call cannot execute with the kill
+        # switch engaged.
+        if getattr(self._settings, "live_kill_switch", False):
+            denied = []
+            for opp in opportunities:
+                opp_dict = opp if isinstance(opp, dict) else opp.to_dict()
+                denied.append({
+                    "symbol": opp_dict.get("symbol", "?"),
+                    "strategy": opp_dict.get("strategy", "?"),
+                    "status": "denied",
+                    "reason": "kill_switch_engaged",
+                    "pnl": 0.0,
+                })
+            return denied
 
         # Compute current equity + mark prices once per cycle.
         balances = self._broker.all_balances()

@@ -7,10 +7,22 @@ Every trade flows through these types:
 """
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+
+
+def _require_finite(value: float, name: str) -> None:
+    """Reject NaN/Inf in money quantities.
+
+    Property (review item 19): ``size``/``price``/``fee``/``cost`` can
+    never be NaN or infinite. A malformed venue response therefore cannot
+    poison positions or P&L — construction fails loudly at the boundary.
+    """
+    if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
 
 
 # ── Asset Classes ──────────────────────────────────────────────────────────
@@ -59,6 +71,9 @@ class Fill:
         self.venue = venue
         self.symbol = symbol
         self.side = side
+        _require_finite(size, "Fill.size")
+        _require_finite(price, "Fill.price")
+        _require_finite(fee, "Fill.fee")
         self.size = size
         self.price = price
         self.fee = fee
@@ -88,6 +103,9 @@ class OrderIntent:
         ttl_ms: int = 5000,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        _require_finite(size, "OrderIntent.size")
+        _require_finite(max_price, "OrderIntent.max_price")
+        _require_finite(min_output, "OrderIntent.min_output")
         self.venue = venue
         self.symbol = symbol
         self.side = side
