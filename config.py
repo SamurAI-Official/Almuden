@@ -147,6 +147,26 @@ class Settings:
     # ── Capital scheduler ───────────────────────────────────────────
     capital_deploy_fraction: float = 0.05  # Start with 5% of capital
 
+    # -- Solana venues (WP-6) ----------------------------------------
+    solana_enabled: bool = False  # Master switch for the Solana venue layer
+    solana_rpc_url: str = ""  # JSON-RPC endpoint (mainnet or devnet)
+    solana_commitment: str = "confirmed"
+    # Signing requires ALL of: solders installed, an explicit keypair env
+    # var (named by solana_keypair_env), and solana_signing_enabled=true.
+    solana_signing_enabled: bool = False
+    solana_keypair_env: str = ""  # NAME of env var holding the keypair
+    solana_max_priority_fee_lamports: int = 1_000_000
+    solana_slippage_bps: int = 50
+    jupiter_api_base: str = "https://lite-api.jup.ag"  # No-key tier
+    jupiter_api_key: str = ""  # Empty = lite-api (no key required)
+    pump_enabled: bool = False  # Pump adapter (READ-ONLY in this phase)
+    pumpportal_api_base: str = "https://pumpportal.fun"  # LOCAL mode only
+    pumpportal_local_tx: bool = False  # Allow unsigned tx construction (OFF)
+    # Wallet tiering: pubkeys only - private keys never live in config.
+    solana_treasury_address: str = ""  # Cold reserve; keys never in process
+    solana_trading_address: str = ""  # Production hot wallet pubkey
+    solana_experiment_address: str = ""  # Isolated experiment wallet pubkey
+
     # ── Alerting ────────────────────────────────────────────────────
     alert_webhook_url: str = ""  # Discord webhook URL
     telegram_bot_token: str = ""  # Telegram bot token
@@ -227,6 +247,23 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         error_window_seconds=_getfloat("ALMUDEN_ERROR_WINDOW_SECONDS", 60),
         permit_ttl_ms=_getint("ALMUDEN_PERMIT_TTL_MS", 10000),
         capital_deploy_fraction=_getfloat("ALMUDEN_CAPITAL_DEPLOY_FRACTION", 0.05),
+        solana_enabled=_getbool("ALMUDEN_SOLANA_ENABLED", False),
+        solana_rpc_url=_get("ALMUDEN_SOLANA_RPC_URL", ""),
+        solana_commitment=_get("ALMUDEN_SOLANA_COMMITMENT", "confirmed"),
+        solana_signing_enabled=_getbool("ALMUDEN_SOLANA_SIGNING_ENABLED", False),
+        solana_keypair_env=_get("ALMUDEN_SOLANA_KEYPAIR_ENV", ""),
+        solana_max_priority_fee_lamports=_getint(
+            "ALMUDEN_SOLANA_MAX_PRIORITY_FEE_LAMPORTS", 1_000_000
+        ),
+        solana_slippage_bps=_getint("ALMUDEN_SOLANA_SLIPPAGE_BPS", 50),
+        jupiter_api_base=_get("ALMUDEN_JUPITER_API_BASE", "https://lite-api.jup.ag"),
+        jupiter_api_key=_get("ALMUDEN_JUPITER_API_KEY", ""),
+        pump_enabled=_getbool("ALMUDEN_PUMP_ENABLED", False),
+        pumpportal_api_base=_get("ALMUDEN_PUMPPORTAL_API_BASE", "https://pumpportal.fun"),
+        pumpportal_local_tx=_getbool("ALMUDEN_PUMPPORTAL_LOCAL_TX", False),
+        solana_treasury_address=_get("ALMUDEN_SOLANA_TREASURY_ADDRESS", ""),
+        solana_trading_address=_get("ALMUDEN_SOLANA_TRADING_ADDRESS", ""),
+        solana_experiment_address=_get("ALMUDEN_SOLANA_EXPERIMENT_ADDRESS", ""),
         alert_webhook_url=_get("ALMUDEN_ALERT_WEBHOOK_URL", ""),
         telegram_bot_token=_get("ALMUDEN_TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=_get("ALMUDEN_TELEGRAM_CHAT_ID", ""),
