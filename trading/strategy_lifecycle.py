@@ -1,14 +1,22 @@
 """Strategy lifecycle management.
 
-Manages the promotion and demotion of strategies through deployment levels,
-from initial research to full production capital.
+Manages promotion and demotion of strategies through deployment levels.
+
+Safety invariants:
+- promote() can only advance ONE level at a time
+- promote() verifies requirements are satisfied
+- Transitions persisted to JSONL event log
+- State reconstructable from event log
+- Research evaluates; lifecycle governor decides
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from config import Settings
 from trading.capital_scheduler import CapitalScheduler
@@ -16,9 +24,14 @@ from trading.capital_scheduler import CapitalScheduler
 log = logging.getLogger(__name__)
 
 
+class LifecycleEvent:
+    REGISTERED = "registered"
+    PROMOTED = "promoted"
+    DEMOTED = "demoted"
+    SUSPENDED = "suspended"
+    REACTIVATED = "reactivated"
 @dataclass
 class StrategyLifecycleState:
-    """Current lifecycle state of a strategy."""
     strategy_id: str
     strategy_version: str
     deployment_level: str
@@ -43,70 +56,122 @@ class StrategyLifecycleState:
 
     @property
     def can_trade_shadow(self) -> bool:
-        return self.deployment_level in ("RESEARCH", "HISTORICAL", "SHADOW", "PAPER", "CANARY", "VERIFIED", "PRODUCTION", "MATURE")
+        return self.deployment_level in (
+            "RESEARCH", "HISTORICAL", "SHADOW", "PAPER",
+            "CANARY", "VERIFIED", "PRODUCTION", "MATURE")
 
     @property
     def can_trade_paper(self) -> bool:
-        return self.deployment_level in ("PAPER", "CANARY", "VERIFIED", "PRODUCTION", "MATURE")
+        return self.deployment_level in (
+            "PAPER", "CANARY", "VERIFIED", "PRODUCTION", "MATURE")
 
     @property
     def can_trade_live(self) -> bool:
-        return self.deployment_level in ("CANARY", "VERIFIED", "PRODUCTION", "MATURE")
+        return self.deployment_level in (
+            "CANARY", "VERIFIED", "PRODUCTION", "MATURE")
 
     @property
     def is_research(self) -> bool:
         return self.deployment_level in ("RESEARCH", "HISTORICAL")
 
 
-# Deployment requirements for each level
 DEPLOYMENT_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
-    "SHADOW": {
-        "min_walk_forward_folds": 3,
-        "min_walk_forward_efficiency": 0.3,
-        "min_shadow_trades": 20,
-        "min_shadow_sharpe": 0.0,
-    },
-    "PAPER": {
-        "min_walk_forward_efficiency": 0.5,
-        "min_walk_forward_robust": True,
-        "min_shadow_trades": 50,
-        "min_shadow_sharpe": 0.5,
-    },
-    "CANARY": {
-        "min_paper_trades": 100,
-        "min_paper_sharpe": 1.0,
-        "max_paper_drawdown_pct": 10.0,
-    },
-    "VERIFIED": {
-        "min_paper_trades": 200,
-        "min_paper_sharpe": 1.2,
-        "max_paper_drawdown_pct": 8.0,
-    },
-    "PRODUCTION": {
-        "min_live_trades": 50,
-        "max_live_drawdown_pct": 5.0,
-    },
-    "MATURE": {
-        "min_live_trades": 200,
-        "max_live_drawdown_pct": 3.0,
-    },
+    "SHADOW": {"min_walk_forward_efficiency": 0.3,
+        "min_shadow_trades": 20, "min_shadow_sharpe": 0.0},
+    "PAPER": {"min_walk_forward_efficiency": 0.5, "min_walk_forward_robust": True,
+        "min_shadow_trades": 50, "min_shadow_sharpe": 0.5},
+    "CANARY": {"min_paper_trades": 100, "min_paper_sharpe": 1.0,
+        "max_paper_drawdown_pct": 10.0},
+    "VERIFIED": {"min_paper_trades": 200, "min_paper_sharpe": 1.2,
+        "max_paper_drawdown_pct": 8.0},
+    "PRODUCTION": {"min_live_trades": 50, "max_live_drawdown_pct": 5.0},
+    "MATURE": {"min_live_trades": 200, "max_live_drawdown_pct": 3.0},
 }
 
-class StrategyLifecycle:
-    """Manages strategy promotion and demotion through deployment levels."""
 
-    def __init__(self, settings: Settings) -> None:
+class StrategyLifecycle:
+    """Manages strategy promotion and demotion through deployment levels.
+    Safety: Promotion is single-level, verified, and persisted."""
+
+    def __init__(self, settings: Settings, persist_path: Optional[str] = None) -> None:
         self._settings = settings
         self._states: Dict[str, StrategyLifecycleState] = {}
-        self._level_order = ['RESEARCH', 'HISTORICAL', 'SHADOW', 'PAPER', 'CANARY', 'VERIFIED', 'PRODUCTION', 'MATURE']
+        self._level_order = [
+            "RESEARCH", "HISTORICAL", "SHADOW", "PAPER",
+            "CANARY", "VERIFIED", "PRODUCTION", "MATURE"]
+        self._level_to_tier = {
+            "RESEARCH": 0, "HISTORICAL": 0, "SHADOW": 0,
+            "PAPER": 1, "CANARY": 1, "VERIFIED": 2,
+            "PRODUCTION": 3, "MATURE": 4}
+        self._persist_path = persist_path or os.path.join(
+            getattr(settings, "memory_dir", ".memory"), "lifecycle.jsonl")
+        os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
+        self._load_events()
 
-    def register(self, strategy_id: str, version: str = '1.0.0') -> StrategyLifecycleState:
+    def _load_events(self) -> None:
+        if not os.path.exists(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        self._apply_event(event)
+                    except (json.JSONDecodeError, KeyError) as e:
+                        log.warning("Skipping malformed lifecycle event: %s", e)
+        except Exception as e:
+            log.error("Failed to load lifecycle events: %s", e)
+
+    def _append_event(self, event_type: str, strategy_id: str, data: Dict[str, Any]) -> None:
+        event = {"type": event_type, "strategy_id": strategy_id,
+            "timestamp": time.time(), **data}
+        try:
+            with open(self._persist_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as e:
+            log.error("Failed to persist lifecycle event: %s", e)
+
+    def _apply_event(self, event: Dict[str, Any]) -> None:
+        event_type = event["type"]
+        strategy_id = event["strategy_id"]
+        if event_type == LifecycleEvent.REGISTERED:
+            self._states[strategy_id] = StrategyLifecycleState(
+                strategy_id=strategy_id,
+                strategy_version=event.get("version", "1.0.0"),
+                deployment_level="RESEARCH", capital_tier=0,
+                first_deployed_at=event.get("timestamp", time.time()))
+        elif event_type == LifecycleEvent.PROMOTED:
+            state = self._states.get(strategy_id)
+            if state:
+                state.deployment_level = event["target_level"]
+                state.capital_tier = event.get("capital_tier", state.capital_tier)
+                state.last_promoted_at = event.get("timestamp", time.time())
+                state.promotion_reason = event.get("reason", "")
+        elif event_type == LifecycleEvent.DEMOTED:
+            state = self._states.get(strategy_id)
+            if state:
+                state.deployment_level = event["target_level"]
+                state.capital_tier = event.get("capital_tier", 0)
+                state.last_demoted_at = event.get("timestamp", time.time())
+                state.demotion_reason = event.get("reason", "")
+        elif event_type == LifecycleEvent.SUSPENDED:
+            state = self._states.get(strategy_id)
+            if state:
+                state.deployment_level = "RESEARCH"
+                state.capital_tier = 0
+                state.demotion_reason = event.get("reason", "suspended")
+
+    def register(self, strategy_id: str, version: str = "1.0.0") -> StrategyLifecycleState:
         state = StrategyLifecycleState(
             strategy_id=strategy_id, strategy_version=version,
-            deployment_level='RESEARCH', capital_tier=0,
+            deployment_level="RESEARCH", capital_tier=0,
             first_deployed_at=time.time())
         self._states[strategy_id] = state
-        log.info('Strategy %s v%s registered at RESEARCH', strategy_id, version)
+        self._append_event(LifecycleEvent.REGISTERED, strategy_id, {"version": version})
+        log.info("Strategy %s v%s registered at RESEARCH", strategy_id, version)
         return state
 
     def get_state(self, strategy_id: str) -> Optional[StrategyLifecycleState]:
@@ -141,6 +206,8 @@ class StrategyLifecycle:
             state.live_drawdown_pct = drawdown_pct
 
     def evaluate_promotion(self, strategy_id: str) -> Optional[str]:
+        """Check if a strategy qualifies for promotion to the NEXT level.
+        This method does NOT modify state - it only evaluates evidence."""
         state = self._states.get(strategy_id)
         if not state:
             return None
@@ -152,23 +219,40 @@ class StrategyLifecycle:
         if self._meets_requirements(state, requirements):
             return target_level
         return None
+    def request_promotion(self, strategy_id: str, evidence: str = "") -> bool:
+        """Request promotion to the next level.
+        SAFETY: Can only advance ONE level at a time.
+        SAFETY: Verifies requirements are satisfied."""
+        target = self.evaluate_promotion(strategy_id)
+        if not target:
+            return False
+        return self._execute_promotion(strategy_id, target, evidence)
 
-    def promote(self, strategy_id: str, target_level: str) -> bool:
+    def _execute_promotion(self, strategy_id: str, target_level: str, reason: str) -> bool:
+        """Internal: execute a verified promotion (single-level only)."""
         state = self._states.get(strategy_id)
         if not state:
             return False
         current_idx = self._level_order.index(state.deployment_level)
         target_idx = self._level_order.index(target_level)
-        if target_idx <= current_idx:
+        if target_idx != current_idx + 1:
+            log.warning("Promotion rejected: %s -> %s is not single-level",
+                        state.deployment_level, target_level)
+            return False
+        requirements = DEPLOYMENT_REQUIREMENTS.get(target_level, {})
+        if not self._meets_requirements(state, requirements):
+            log.warning("Promotion rejected: requirements not met for %s", target_level)
             return False
         old_level = state.deployment_level
         state.deployment_level = target_level
+        state.capital_tier = self._level_to_tier.get(target_level, state.capital_tier)
         state.last_promoted_at = time.time()
-        state.promotion_reason = f'Promoted from {old_level} to {target_level}'
-        level_to_tier = {'RESEARCH': 0, 'HISTORICAL': 0, 'SHADOW': 0,
-            'PAPER': 1, 'CANARY': 1, 'VERIFIED': 2, 'PRODUCTION': 3, 'MATURE': 4}
-        state.capital_tier = level_to_tier.get(target_level, state.capital_tier)
-        log.info('Strategy %s promoted: %s -> %s (tier %d)', strategy_id, old_level, target_level, state.capital_tier)
+        state.promotion_reason = reason
+        self._append_event(LifecycleEvent.PROMOTED, strategy_id, {
+            "from_level": old_level, "target_level": target_level,
+            "capital_tier": state.capital_tier, "reason": reason})
+        log.info("Strategy %s promoted: %s -> %s (tier %d)",
+                 strategy_id, old_level, target_level, state.capital_tier)
         return True
 
     def demote(self, strategy_id: str, reason: str, levels: int = 1) -> bool:
@@ -178,54 +262,58 @@ class StrategyLifecycle:
         current_idx = self._level_order.index(state.deployment_level)
         new_idx = max(0, current_idx - levels)
         old_level = state.deployment_level
-        state.deployment_level = self._level_order[new_idx]
+        new_level = self._level_order[new_idx]
+        state.deployment_level = new_level
+        state.capital_tier = self._level_to_tier.get(new_level, 0)
         state.last_demoted_at = time.time()
         state.demotion_reason = reason
-        level_to_tier = {'RESEARCH': 0, 'HISTORICAL': 0, 'SHADOW': 0,
-            'PAPER': 1, 'CANARY': 1, 'VERIFIED': 2, 'PRODUCTION': 3, 'MATURE': 4}
-        state.capital_tier = level_to_tier.get(state.deployment_level, 0)
-        log.warning('Strategy %s demoted: %s -> %s (%s)', strategy_id, old_level, state.deployment_level, reason)
+        self._append_event(LifecycleEvent.DEMOTED, strategy_id, {
+            "from_level": old_level, "target_level": new_level,
+            "capital_tier": state.capital_tier, "reason": reason})
+        log.warning("Strategy %s demoted: %s -> %s (%s)",
+                    strategy_id, old_level, new_level, reason)
         return True
-
     def check_health(self, strategy_id: str) -> Dict[str, Any]:
         state = self._states.get(strategy_id)
         if not state or not state.can_trade_live:
-            return {'healthy': True, 'action': 'none'}
+            return {"healthy": True, "action": "none"}
         issues = []
-        max_dd = getattr(self._settings, 'max_drawdown_pct', 10.0)
+        max_dd = getattr(self._settings, "max_drawdown_pct", 10.0)
         if state.live_drawdown_pct > max_dd:
-            issues.append(f'drawdown {state.live_drawdown_pct:.1f}% > {max_dd}%')
+            issues.append(f"drawdown {state.live_drawdown_pct:.1f}% > {max_dd}%")
         if state.live_trades > 20 and state.live_pnl < 0:
-            issues.append(f'negative live PnL after {state.live_trades} trades')
+            issues.append(f"negative live PnL after {state.live_trades} trades")
         if issues:
-            return {'healthy': False, 'action': 'demote', 'reason': '; '.join(issues)}
-        return {'healthy': True, 'action': 'none'}
+            return {"healthy": False, "action": "demote", "reason": "; ".join(issues)}
+        return {"healthy": True, "action": "none"}
 
     def get_capital_allocation(self, strategy_id: str, total_capital: float) -> float:
         state = self._states.get(strategy_id)
         if not state or not state.can_trade_live:
             return 0.0
-        scheduler = CapitalScheduler(self._settings, total_capital, initial_tier=state.capital_tier)
+        scheduler = CapitalScheduler(
+            self._settings, total_capital, initial_tier=state.capital_tier)
         return scheduler.get_max_capital()
 
-    def _meets_requirements(self, state: StrategyLifecycleState, requirements: Dict[str, Any]) -> bool:
+    def _meets_requirements(self, state: StrategyLifecycleState,
+            requirements: Dict[str, Any]) -> bool:
         for key, threshold in requirements.items():
-            if key.startswith('min_'):
-                actual = getattr(state, key.replace('min_', ''), 0)
+            if key.startswith("min_"):
+                actual = getattr(state, key.replace("min_", ""), 0)
                 if isinstance(threshold, bool):
                     if actual != threshold:
                         return False
                 elif actual < threshold:
                     return False
-            elif key.startswith('max_'):
-                actual = getattr(state, key.replace('max_', ''), float('inf'))
+            elif key.startswith("max_"):
+                actual = getattr(state, key.replace("max_", ""), float("inf"))
                 if actual > threshold:
                     return False
         return True
 
     def summary(self) -> Dict[str, Any]:
-        return {sid: {'level': s.deployment_level, 'tier': s.capital_tier,
-            'shadow_trades': s.shadow_trades, 'shadow_pnl': round(s.shadow_pnl, 2),
-            'paper_trades': s.paper_trades, 'paper_pnl': round(s.paper_pnl, 2),
-            'live_trades': s.live_trades, 'live_pnl': round(s.live_pnl, 2)}
+        return {sid: {"level": s.deployment_level, "tier": s.capital_tier,
+            "shadow_trades": s.shadow_trades, "shadow_pnl": round(s.shadow_pnl, 2),
+            "paper_trades": s.paper_trades, "paper_pnl": round(s.paper_pnl, 2),
+            "live_trades": s.live_trades, "live_pnl": round(s.live_pnl, 2)}
             for sid, s in self._states.items()}

@@ -89,21 +89,58 @@ class TestStrategyLifecycle(unittest.TestCase):
         self.assertTrue(state.can_trade_shadow)
         self.assertFalse(state.can_trade_live)
 
-    def test_promote(self):
+    def test_promote_single_level(self):
+        """Promotion can only advance one level at a time."""
         self.lifecycle.register("test_strategy")
-        result = self.lifecycle.promote("test_strategy", "SHADOW")
+        # First promotion: RESEARCH -> HISTORICAL
+        result = self.lifecycle.request_promotion("test_strategy", "evidence")
+        self.assertTrue(result)
+        state = self.lifecycle.get_state("test_strategy")
+        self.assertEqual(state.deployment_level, "HISTORICAL")
+
+    def test_promote_to_shadow(self):
+        """Second promotion: HISTORICAL -> SHADOW."""
+        self.lifecycle.register("test_strategy")
+        # First promote to HISTORICAL
+        self.lifecycle.request_promotion("test_strategy", "evidence")
+        # Set up metrics to satisfy SHADOW requirements
+        self.lifecycle.update_shadow_metrics("test_strategy", trades=25, pnl=1.0,
+            sharpe=0.5, walk_forward_efficiency=0.5, walk_forward_robust=True)
+        # Promote to SHADOW
+        result = self.lifecycle.request_promotion("test_strategy", "evidence")
         self.assertTrue(result)
         state = self.lifecycle.get_state("test_strategy")
         self.assertEqual(state.deployment_level, "SHADOW")
 
+    def test_promote_cannot_skip_levels(self):
+        """Cannot skip levels - must go through each gate."""
+        self.lifecycle.register("test_strategy")
+        # Try to promote without metrics - should only go to HISTORICAL
+        result = self.lifecycle.request_promotion("test_strategy", "evidence")
+        state = self.lifecycle.get_state("test_strategy")
+        # First promotion goes to HISTORICAL (not SHADOW)
+        self.assertEqual(state.deployment_level, "HISTORICAL")
+
+    def test_promote_verifies_requirements(self):
+        """Promotion to SHADOW verifies requirements are satisfied."""
+        self.lifecycle.register("test_strategy")
+        # Promote to HISTORICAL first
+        self.lifecycle.request_promotion("test_strategy", "evidence")
+        # Try to promote to SHADOW without metrics - should fail
+        result = self.lifecycle.request_promotion("test_strategy", "evidence")
+        self.assertFalse(result)
+        state = self.lifecycle.get_state("test_strategy")
+        self.assertEqual(state.deployment_level, "HISTORICAL")
+
     def test_demote(self):
         self.lifecycle.register("test_strategy")
-        self.lifecycle.promote("test_strategy", "PAPER")
+        # Promote to HISTORICAL first
+        self.lifecycle.request_promotion("test_strategy", "evidence")
+        # Demote back to RESEARCH
         result = self.lifecycle.demote("test_strategy", "poor performance")
         self.assertTrue(result)
         state = self.lifecycle.get_state("test_strategy")
-        # Demote by 1 level: PAPER -> SHADOW
-        self.assertEqual(state.deployment_level, "SHADOW")
+        self.assertEqual(state.deployment_level, "RESEARCH")
 
     def test_cannot_demote_below_research(self):
         self.lifecycle.register("test_strategy")
@@ -113,7 +150,16 @@ class TestStrategyLifecycle(unittest.TestCase):
 
     def test_check_health_unhealthy(self):
         self.lifecycle.register("test_strategy")
-        self.lifecycle.promote("test_strategy", "CANARY")
+        # Promote through the lifecycle: RESEARCH -> HISTORICAL -> SHADOW -> PAPER -> CANARY
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> HISTORICAL
+        self.lifecycle.update_shadow_metrics("test_strategy", trades=60, pnl=2.0,
+            sharpe=0.6, walk_forward_efficiency=0.6, walk_forward_robust=True)
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> SHADOW
+        self.lifecycle.update_paper_metrics("test_strategy", trades=110, pnl=5.0,
+            sharpe=1.1, drawdown_pct=5.0)
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> PAPER
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> CANARY
+        # Now trigger unhealthy state
         self.lifecycle.update_live_metrics("test_strategy", trades=30, pnl=-10.0, drawdown_pct=15.0)
         health = self.lifecycle.check_health("test_strategy")
         self.assertFalse(health["healthy"])
@@ -126,7 +172,15 @@ class TestStrategyLifecycle(unittest.TestCase):
 
     def test_get_capital_allocation_canary(self):
         self.lifecycle.register("test_strategy")
-        self.lifecycle.promote("test_strategy", "CANARY")
+        # Promote to CANARY through proper gates
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> HISTORICAL
+        self.lifecycle.update_shadow_metrics("test_strategy", trades=60, pnl=2.0,
+            sharpe=0.6, walk_forward_efficiency=0.6, walk_forward_robust=True)
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> SHADOW
+        self.lifecycle.update_paper_metrics("test_strategy", trades=110, pnl=5.0,
+            sharpe=1.1, drawdown_pct=5.0)
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> PAPER
+        self.lifecycle.request_promotion("test_strategy", "evidence")  # -> CANARY
         allocation = self.lifecycle.get_capital_allocation("test_strategy", 10000.0)
         self.assertGreater(allocation, 0.0)
 
