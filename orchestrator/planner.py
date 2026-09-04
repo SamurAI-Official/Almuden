@@ -18,11 +18,7 @@ class Planner:
     PHASES: List[str] = [
         "poll",
         "scan",
-        "evaluate",
         "execute",
-        "triangular_scan",
-        "triangular_evaluate",
-        "triangular_execute",
         "rebalance",
     ]
 

@@ -38,6 +38,10 @@ class CrossVenueStrategy(Strategy):
                 if sym not in self._symbols:
                     self._symbols.append(sym)
 
+    @property
+    def risk_class(self) -> str:
+        return "arbitrage"
+
     def scan(
         self,
         books: Dict[Tuple[str, str], Book],
@@ -83,8 +87,8 @@ class CrossVenueStrategy(Strategy):
     ) -> Optional[Opportunity]:
         """Check one direction for a cross-venue opportunity."""
         ask = buy_book.best_ask
-        bid = sell_book.best_ask
-        if ask is None or bid is None or ask[0] <= 0:
+        bid = sell_book.best_bid
+        if ask is None or bid is None or ask[0] <= 0 or bid[0] <= 0:
             return None
 
         gross_edge = (bid[0] / ask[0] - 1.0) * 10_000.0

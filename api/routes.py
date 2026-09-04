@@ -89,9 +89,9 @@ def create_app(
 
     @app.get("/api/positions")
     async def get_positions(api_key: str = Depends(verify_api_key)):
-        """Get current positions."""
-        if engine and hasattr(engine, "_executor"):
-            return engine._executor.balances.all()
+        """Get current positions (paper balances per venue)."""
+        if engine and hasattr(engine, "_broker"):
+            return engine._broker.all_balances()
         return {}
 
     @app.get("/api/trades")
@@ -149,10 +149,12 @@ def create_app(
     @app.post("/api/kill-switch")
     async def kill_switch(api_key: str = Depends(verify_api_key)):
         """Engage the kill switch."""
-        if engine and hasattr(engine, "_executor"):
-            if hasattr(engine._executor, "_broker"):
-                engine._executor._broker._kill_switch = True
-            return {"status": "kill_switch_engaged"}
+        if engine and hasattr(engine, "_broker"):
+            broker = engine._broker
+            if hasattr(broker, "_kill_switch"):
+                setattr(broker, "_kill_switch", True)
+                return {"status": "kill_switch_engaged"}
+            return {"status": "kill_switch_not_supported"}
         return {"status": "no_engine"}
 
     @app.get("/api/config")

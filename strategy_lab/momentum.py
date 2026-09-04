@@ -23,6 +23,10 @@ class MomentumStrategy(Strategy):
 
     name = "momentum"
 
+    @property
+    def risk_class(self) -> str:
+        return "trend"
+
     def scan(
         self,
         books: Dict[Tuple[str, str], Book],

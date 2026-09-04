@@ -58,6 +58,10 @@ class TriangularStrategy(Strategy):
 
     name = "triangular"
 
+    @property
+    def risk_class(self) -> str:
+        return "arbitrage"
+
     def scan(
         self,
         books: Dict[Tuple[str, str], Book],

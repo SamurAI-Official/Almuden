@@ -85,12 +85,9 @@ class ExchangeKeys:
 class Settings:
     """All runtime settings, populated from env / .env."""
 
-            
-    # ── Mode ────────────────────────────────────────────────────────
+    # ── Mode ─────────────────────────────────────────────────────────
     mode: str = "paper"  # paper | live
     default_quote: str = "USDT"  # Default quote currency for seeding balances
-
-
     # ── Venues & symbols ────────────────────────────────────────────
     venues: List[str] = field(
         default_factory=lambda: [
@@ -236,3 +233,4 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         log_level=_get("ALMUDEN_LOG_LEVEL", "INFO").upper(),
         keys=keys,
     )
+

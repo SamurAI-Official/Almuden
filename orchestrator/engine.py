@@ -1,12 +1,11 @@
-"""Main engine loop — ties the environment, scanner, evaluator, executor,
-and broker into a single async cycle.
+"""Main engine loop — ties the environment, strategy lab, broker,
+and risk into a single async cycle.
 
 One cycle:
   1. Poll environment (market data, news, exchange health, regime).
-  2. Scan for cross-venue opportunities.
-  3. Evaluate (fee-aware) and filter.
-  4. Execute via the broker (paper by default).
-  5. Check inventory drift and emit rebalance actions.
+  2. Scan with all registered strategies (strategy lab).
+  3. Execute viable opportunities via the unified broker (paper by default).
+  4. Check inventory drift and emit rebalance actions.
 """
 from __future__ import annotations
 
@@ -20,15 +19,7 @@ from database.redis import make_cache
 from environment import Environment, EnvironmentState
 from orchestrator.events import EventBus
 from orchestrator.planner import Planner
-from trading.arbitrage.evaluator import Evaluator
-from trading.arbitrage.executor import Executor
-from trading.arbitrage.rebalancer import Rebalancer
-from trading.arbitrage.scanner import Scanner
-from trading.arbitrage.triangular import (
-    TriangularEvaluator,
-    TriangularExecutor,
-    TriangularScanner,
-)
+from strategy_lab import create_registry
 from trading.exchange import Book, ExchangeGateway
 from trading.paper import PaperBroker
 
@@ -50,15 +41,12 @@ class Engine:
         self._gateway = self._environment._market._gateway  # Reuse gateway from environment
         self._cache = make_cache(settings.redis_url)
         self._store = make_store(settings.postgres_dsn)
-        self._scanner = Scanner(self.DEFAULT_SYMBOLS)
-        self._evaluator = Evaluator(settings)
+        # Strategy lab replaces scanner/evaluator/executor
+        self._registry = create_registry(settings)
         self._broker = PaperBroker(settings)
-        self._executor = Executor(settings, self._broker)
+        # Rebalancer for inventory management
+        from trading.arbitrage.rebalancer import Rebalancer
         self._rebalancer = Rebalancer(settings)
-        # Triangular arb components
-        self._tri_scanner = TriangularScanner(settings)
-        self._tri_evaluator = TriangularEvaluator(settings)
-        self._tri_executor = TriangularExecutor(settings, self._broker)
         self._running = False
 
     async def start(self) -> None:
@@ -91,55 +79,98 @@ class Engine:
         }
         await self._bus.publish("environment", env_state.summary())
 
-        # 2. Scan (cross-venue)
-        opportunities = self._scanner.scan(books)
-        summary["opportunities"] = len(opportunities)
-        await self._bus.publish("scan", {"opportunities": opportunities})
+        # 2. Scan with all registered strategies
+        strategy_opps = self._registry.scan_all(books, env_state)
+        all_opps = []
+        for name, opps in strategy_opps.items():
+            all_opps.extend(opps)
+        summary["opportunities"] = len(all_opps)
+        await self._bus.publish("scan", {"opportunities": all_opps, "by_strategy": {
+            name: len(opps) for name, opps in strategy_opps.items()
+        }})
 
-        # 3. Evaluate (cross-venue)
-        scored = self._evaluator.evaluate(opportunities)
-        summary["scored"] = len(scored)
-        await self._bus.publish("evaluate", {"scored": scored})
-
-        # 4. Execute (cross-venue)
-        if scored:
-            results = await self._executor.execute_async(scored)
-            summary["executed"] = sum(1 for r in results if r.status == "executed")
-            summary["pnl"] = sum(r.pnl for r in results)
+        # 3. Execute via unified broker interface
+        if all_opps:
+            results = await self._execute_opportunities(all_opps)
+            summary["executed"] = sum(1 for r in results if r.get("status") == "executed")
+            summary["pnl"] = sum(r.get("pnl", 0) for r in results)
             await self._bus.publish("execute", {"results": results})
 
-        # 5. Triangular scan
-        if self._settings.triangular_enabled:
-            tri_opps = self._tri_scanner.scan(books)
-            summary["triangular_opportunities"] = len(tri_opps)
-            await self._bus.publish("triangular_scan", {"opportunities": tri_opps})
-
-            # 6. Triangular evaluate
-            tri_scored = self._tri_evaluator.evaluate(tri_opps)
-            summary["triangular_scored"] = len(tri_scored)
-            await self._bus.publish("triangular_evaluate", {"scored": tri_scored})
-
-            # 7. Triangular execute
-            if tri_scored:
-                tri_results = self._tri_executor.execute(tri_scored)
-                summary["triangular_executed"] = sum(
-                    1 for r in tri_results if r.status == "executed"
-                )
-                summary["triangular_pnl"] = sum(r.pnl for r in tri_results)
-                await self._bus.publish("triangular_execute", {"results": tri_results})
-
-        # 8. Rebalance check
+        # 4. Rebalance check
         prices = {
             sym: book.mid
             for (venue, sym), book in books.items()
             if book.mid is not None
         }
-        actions = self._rebalancer.check(self._executor.balances.all(), prices)
+        actions = self._rebalancer.check(self._broker.all_balances(), prices)
         summary["rebalance_actions"] = len(actions)
         if actions:
             await self._bus.publish("rebalance", {"actions": actions})
 
         return summary
+
+    async def _execute_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
+        """Execute opportunities using the unified broker interface."""
+        from trading.core import OrderIntent
+        
+        results = []
+        for opp in opportunities:
+            # Build OrderIntent from opportunity metadata
+            opp_dict = opp if isinstance(opp, dict) else opp.to_dict()
+            metadata = opp_dict.get("metadata", {})
+            size = float(opp_dict.get("size", 0) or 0)
+            
+            # Determine if this is a cross-venue arb opportunity
+            buy_venue = metadata.get("buy_venue")
+            sell_venue = metadata.get("sell_venue")
+            if buy_venue and sell_venue and size > 0 and metadata.get("buy_price") and metadata.get("sell_price"):
+                # Cross-venue arbitrage: buy on cheap, sell on expensive
+                buy_intent = OrderIntent(
+                    venue=buy_venue, symbol=opp_dict["symbol"], side="buy",
+                    size=size, max_price=float(metadata.get("buy_price", 0)),
+                    ttl_ms=10000,
+                )
+                sell_intent = OrderIntent(
+                    venue=sell_venue, symbol=opp_dict["symbol"], side="sell",
+                    size=size, max_price=float(metadata.get("sell_price", 0)),
+                    min_output=size * float(metadata.get("sell_price", 0)) * 0.99,
+                    ttl_ms=10000,
+                )
+                
+                try:
+                    buy_fill = await self._broker.execute(buy_intent)
+                    sell_fill = await self._broker.execute(sell_intent)
+                    
+                    pnl = sell_fill.proceeds - buy_fill.cost
+                    results.append({
+                        "symbol": opp_dict["symbol"],
+                        "strategy": opp_dict.get("strategy", "unknown"),
+                        "buy_venue": buy_venue,
+                        "sell_venue": sell_venue,
+                        "pnl": pnl,
+                        "status": "executed",
+                        "buy_fill": buy_fill.__dict__,
+                        "sell_fill": sell_fill.__dict__,
+                    })
+                except Exception as exc:
+                    results.append({
+                        "symbol": opp_dict["symbol"],
+                        "strategy": opp_dict.get("strategy", "unknown"),
+                        "status": "error",
+                        "reason": str(exc),
+                        "pnl": 0.0,
+                    })
+            else:
+                # Non-arb opportunity or triangular — record but don't execute yet
+                results.append({
+                    "symbol": opp_dict["symbol"],
+                    "strategy": opp_dict.get("strategy", "unknown"),
+                    "status": "skipped",
+                    "reason": "no execution path for this opportunity type",
+                    "pnl": 0.0,
+                })
+        
+        return results
 
     async def _poll_books(self) -> Dict[Tuple[str, str], Book]:
         """Fetch books via the environment's market feed.

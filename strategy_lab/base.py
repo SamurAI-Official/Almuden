@@ -54,6 +54,12 @@ class Strategy(ABC):
 
     name: str = "base"
 
+    @property
+    @abstractmethod
+    def risk_class(self) -> str:
+        """Risk class for capital allocation (e.g. 'arbitrage', 'pump')."""
+        ...
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 

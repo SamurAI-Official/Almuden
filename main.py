@@ -252,22 +252,46 @@ async def run_dry_run(settings) -> None:
     engine = Engine(settings)
     await engine.start()
     try:
-        # Monkey-patch the executor to no-op.
-        original_execute = engine._executor.execute
+        # Monkey-patch the execution path to no-op via a dry broker wrapper.
+        original_broker = engine._broker
 
-        def dry_execute(opportunities):
-            from trading.arbitrage.executor import CycleResult
-            return [
-                CycleResult(
-                    symbol=o["symbol"], buy_venue=o["buy_venue"], sell_venue=o["sell_venue"],
-                    size=0, buy_price=o.get("buy_price", 0), sell_price=o.get("sell_price", 0),
-                    edge_bps=o.get("edge_bps", 0), net_edge_bps=o.get("net_edge_bps", 0),
-                    pnl=0, status="dry_run",
+        class _DryBroker:
+            """Wrapper that records fills without touching balances."""
+
+            FEE_BPS = 0.0
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            async def execute(self, intent):
+                from trading.core import Fill
+                return Fill(
+                    venue=intent.venue,
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    size=intent.size,
+                    price=intent.max_price,
+                    fee=0.0,
+                    cost=(intent.size * intent.max_price if intent.side == "buy" else 0.0),
+                    proceeds=(intent.size * intent.max_price if intent.side == "sell" else 0.0),
+                    order_id="dry-run",
+                    status="dry_run",
                 )
-                for o in opportunities
-            ]
 
-        engine._executor.execute = dry_execute  # type: ignore[assignment]
+            async def balances(self, venue="") -> dict:
+                return {}
+
+            def balance(self, venue, asset) -> float:
+                return 0.0
+
+            def all_balances(self) -> dict:
+                return {}
+
+            @property
+            def fills(self) -> list:
+                return []
+
+        engine._broker = _DryBroker(original_broker)  # type: ignore[assignment]
         summary = await engine.run_once()
         print(json.dumps(summary, indent=2, default=str))
     finally:
