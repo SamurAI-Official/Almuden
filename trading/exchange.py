@@ -128,7 +128,11 @@ class ExchangeGateway:
         """Fetch the L2 order book for *symbol* on *venue*."""
         exchange = await self._get_exchange(venue)
         try:
-            ob = await exchange.fetch_order_book(symbol, limit=20)
+            # KuCoin requires limit to be 20 or 100; other venues accept any limit
+            limit = 20
+            if venue == "kucoin":
+                limit = 100
+            ob = await exchange.fetch_order_book(symbol, limit=limit)
         except Exception as exc:
             raise ExchangeError(f"{venue} {symbol}: {exc}") from exc
 

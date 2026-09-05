@@ -35,7 +35,7 @@ class DataLoader:
         self._cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
 
-    def load(
+    async def load(
         self,
         venue: str,
         symbol: str,
@@ -63,8 +63,8 @@ class DataLoader:
             log.info("Loading cached data: %s", cache_path)
             return pd.read_parquet(cache_path)
 
-        # Fetch from exchange
-        df = self._fetch_from_exchange(venue, symbol, start, end, timeframe)
+        # Fetch from exchange (async)
+        df = await self._fetch_from_exchange(venue, symbol, start, end, timeframe)
 
         # Cache to disk
         if df is not None and not df.empty:
@@ -73,7 +73,27 @@ class DataLoader:
 
         return df if df is not None else pd.DataFrame()
 
-    def _fetch_from_exchange(
+    def load_sync(
+        self,
+        venue: str,
+        symbol: str,
+        start: str,
+        end: str,
+        timeframe: str = "1h",
+    ) -> pd.DataFrame:
+        """Synchronous wrapper for load()."""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            # We are in an async context, create a new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, self.load(venue, symbol, start, end, timeframe))
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self.load(venue, symbol, start, end, timeframe))
+
+    async def _fetch_from_exchange(
         self,
         venue: str,
         symbol: str,
@@ -81,7 +101,7 @@ class DataLoader:
         end: str,
         timeframe: str,
     ) -> Optional[pd.DataFrame]:
-        """Fetch OHLCV data from an exchange via CCXT."""
+        """Fetch OHLCV data from an exchange via CCXT (async)."""
         try:
             import ccxt.async_support as ccxt
             from trading.exchange import VENUE_MAP
@@ -106,7 +126,7 @@ class DataLoader:
             # Paginate through data (CCXT has limits per request)
             while current_ts < end_ts:
                 try:
-                    bars = exchange.fetch_ohlcv(
+                    bars = await exchange.fetch_ohlcv(
                         symbol, timeframe, since=current_ts, limit=1000
                     )
                     if not bars:
@@ -121,7 +141,7 @@ class DataLoader:
                     log.warning("Fetch error: %s", exc)
                     break
 
-            exchange.close()
+            await exchange.close()
 
             if not all_bars:
                 return None
